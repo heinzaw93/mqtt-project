@@ -1,0 +1,12 @@
+#!/data/data/com.termux/files/usr/bin/sh
+exec 2>&1
+# Make sure HOME points to your .node-red dir
+export HOME=/data/data/com.termux/files/home
+cd $HOME/.node-red
+
+# Add npm global bin path (if you changed npm prefix)
+export PATH="$PREFIX/bin:$HOME/.npm-global/bin:$PATH"
+
+# Start Node-RED with verbose logging
+exec node-red -v
+
