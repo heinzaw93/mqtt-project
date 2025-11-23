@@ -1,0 +1,32 @@
+# ===== Devices (scoped by username) =====
+# Device publishes its OWN public key and registration request:
+pattern write keys/public key/%u/#
+pattern write registration/request/%u/#
+
+# Device reads ONLY its OWN responses from Sunny:
+pattern read  keys/registration/%u/#
+pattern read  registration/respond/%u/#
+#==== Per Device =====
+
+# ===== Cake's 1883 bridge user =====
+user cake_plain
+
+#Database Sync
+topic read sync/data/#
+topic write sync/data/keys_
+#Baseline Bridge
+topic read home/#
+topic write home/#
+
+
+user bob
+#Database Sync
+topic read sync/data/#
+topic write sync/data/keys_
+topic read home/#
+
+user alice
+#Database Sync
+topic read sync/data/#
+topic write sync/data/keys_
+

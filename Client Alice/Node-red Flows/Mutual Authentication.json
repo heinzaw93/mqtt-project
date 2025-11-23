@@ -1,0 +1,1084 @@
+[
+    {
+        "id": "2a0e24ae5492f4f9",
+        "type": "tab",
+        "label": "Mutual Authentication",
+        "disabled": false,
+        "info": "",
+        "env": []
+    },
+    {
+        "id": "63033d398bec4e1f",
+        "type": "exec",
+        "z": "2a0e24ae5492f4f9",
+        "command": "iwgetid -r",
+        "addpay": "",
+        "append": "",
+        "useSpawn": "false",
+        "timer": "",
+        "winHide": false,
+        "oldrc": false,
+        "name": "Check Network",
+        "x": 720,
+        "y": 320,
+        "wires": [
+            [
+                "a815317ae1019aaa"
+            ],
+            [],
+            []
+        ]
+    },
+    {
+        "id": "1f9b53f0fd6242c9",
+        "type": "inject",
+        "z": "2a0e24ae5492f4f9",
+        "name": "Authentication Timer",
+        "props": [
+            {
+                "p": "payload"
+            },
+            {
+                "p": "topic",
+                "vt": "str"
+            }
+        ],
+        "repeat": "300",
+        "crontab": "",
+        "once": true,
+        "onceDelay": "30",
+        "topic": "",
+        "payload": "",
+        "payloadType": "date",
+        "x": 400,
+        "y": 320,
+        "wires": [
+            []
+        ]
+    },
+    {
+        "id": "c425cafccf7bdbd6",
+        "type": "function",
+        "z": "2a0e24ae5492f4f9",
+        "name": "Get JWT",
+        "func": "const fs = global.get('fs');\nconst crypto = global.get('crypto');\n\n// Step 0: Debug the raw result from SQLCipher\n//node.warn(\"Received Data: \" + msg.payload);\n\n// Step 1: Split the payload by '|'\nconst parts = msg.payload.trim().split('|');\nif (parts.length !== 2) {\n    node.error(\"Payload is not in expected 'device_id|jwt_token' format.\");\n    return null;\n}\n\nconst [device_id, jwt_token] = parts;\n\n// Step 2: Validate parsed data\nif (!device_id || !jwt_token) {\n    node.error(\"Missing device_id or jwt_token in result.\");\n    return null;\n}\n\n// Step 3: Prepare data to sign\nconst dataToSign = `${device_id}|${jwt_token}`;\n\n// Step 4: Load  Alice’s private key from global context\nlet privateKeyPEM = global.get(\"private_key\", \"file\");\nif (!privateKeyPEM) {\n    node.error(\"❌ Alice's private key not found in global context!\");\n    return null;\n}\n\n// Step 5: Sign the data using ECDSA (SHA-256)\nconst signer = crypto.createSign('sha256');\nsigner.update(dataToSign);\nsigner.end();\nconst signature = signer.sign(privateKeyPEM, 'base64');\n\n// Step 6: Get wifi_SSID from flow context\nconst wifi_SSID = flow.get('wifi_ssid');\n\nif (!wifi_SSID) {\n    node.warn(\"⚠️ wifi_SSID not set in flow context.\");\n} else {\n    //node.warn(\"✅ Retrieved wifi_SSID from flow context: \" + wifi_SSID);\n}\n\n// Step 7: Return structured payload\nmsg.payload = {\n    device_id: device_id,\n    jwt: jwt_token,\n    signature: signature,\n    wifi_SSID: wifi_SSID || \"UNKNOWN\"\n};\n\n//node.warn(\"📦 Signed Payload with SSID: \" + JSON.stringify(msg.payload));\nreturn msg;\n",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 1360,
+        "y": 320,
+        "wires": [
+            [
+                "f61f8169ab3af61f"
+            ]
+        ]
+    },
+    {
+        "id": "a815317ae1019aaa",
+        "type": "function",
+        "z": "2a0e24ae5492f4f9",
+        "name": "Prepare Query to select JWT ",
+        "func": "// === 1. Get SSID and store in flow context ===\nlet ssid = msg.payload.trim();\nflow.set('wifi_ssid', ssid);\nnode.status({fill: \"green\", shape: \"dot\", text: \"Connected to SSID: \" + ssid});\n\n// === 2. Get deviceID from global context with retries ===\nlet deviceID;\nlet attempts = 0;\n\nwhile (!deviceID && attempts < 5) {\n    deviceID = global.get(\"deviceID\", \"file\");\n    if (!deviceID) {\n        node.warn(\"Retrying retrieval of deviceID...\");\n        attempts++;\n        const waitUntil = Date.now() + 200;\n        while (Date.now() < waitUntil); // busy-wait 200ms\n    }\n}\n\nif (!deviceID) {\n    node.error(\"Device ID still not found in global context!\");\n    return null;\n}\n\n// === 3. Prepare SQL query for sqlcipher ===\nconst dbPath = \"/etc/mosquitto/certs/update_database.db\";\nconst pragmaKey = env.get(\"DB_PASSWORD\");\n\n// Escape quotes in deviceID to avoid SQL injection\ndeviceID = deviceID.replace(/'/g, \"''\");\n\n// Build SQLCipher SELECT command for DeviceProfile table\nconst sqlSelect = `\nPRAGMA key = '${pragmaKey}';\nSELECT device_id, jwt_token FROM DeviceProfile WHERE device_id = '${deviceID}';\n`;\n\nmsg.payload = `sqlcipher ${dbPath} <<< \"${sqlSelect.trim()}\"`;\n\nreturn msg;\n",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 960,
+        "y": 320,
+        "wires": [
+            [
+                "6687521049543968"
+            ]
+        ]
+    },
+    {
+        "id": "5e9ed4d99552d292",
+        "type": "mqtt out",
+        "z": "2a0e24ae5492f4f9",
+        "name": "Authentication Request to Sunny",
+        "topic": "authentication/request/alice",
+        "qos": "0",
+        "retain": "",
+        "respTopic": "",
+        "contentType": "",
+        "userProps": "",
+        "correl": "",
+        "expiry": "",
+        "broker": "72399054283f9843",
+        "x": 2100,
+        "y": 240,
+        "wires": []
+    },
+    {
+        "id": "6687521049543968",
+        "type": "exec",
+        "z": "2a0e24ae5492f4f9",
+        "command": "",
+        "addpay": "payload",
+        "append": "",
+        "useSpawn": "false",
+        "timer": "",
+        "winHide": false,
+        "oldrc": false,
+        "name": "Select JWT Token",
+        "x": 1190,
+        "y": 300,
+        "wires": [
+            [
+                "c425cafccf7bdbd6"
+            ],
+            [],
+            []
+        ]
+    },
+    {
+        "id": "c4e2a962c9866928",
+        "type": "mqtt in",
+        "z": "2a0e24ae5492f4f9",
+        "name": "Authentication Respond",
+        "topic": "authentication/respond/alice",
+        "qos": "0",
+        "datatype": "auto-detect",
+        "broker": "1dbac324dcb7ed48",
+        "nl": false,
+        "rap": true,
+        "rh": 0,
+        "inputs": 0,
+        "x": 280,
+        "y": 660,
+        "wires": [
+            [
+                "93ecd39c7ec78d61"
+            ]
+        ]
+    },
+    {
+        "id": "f13937e258ae4822",
+        "type": "exec",
+        "z": "2a0e24ae5492f4f9",
+        "command": "",
+        "addpay": "payload",
+        "append": "",
+        "useSpawn": "false",
+        "timer": "",
+        "winHide": false,
+        "oldrc": false,
+        "name": "Update authentication status and select public key",
+        "x": 1350,
+        "y": 700,
+        "wires": [
+            [
+                "7847d01ad2184a94"
+            ],
+            [],
+            []
+        ]
+    },
+    {
+        "id": "b689d80fe5b4efc2",
+        "type": "comment",
+        "z": "2a0e24ae5492f4f9",
+        "name": "Publish JWT to host device to authenticate",
+        "info": "",
+        "x": 420,
+        "y": 260,
+        "wires": []
+    },
+    {
+        "id": "7847d01ad2184a94",
+        "type": "function",
+        "z": "2a0e24ae5492f4f9",
+        "name": "Verify Signature/ JWT and prepare query to update authentication status",
+        "func": "const fs = global.get('fs');\nconst crypto = global.get('crypto');\nconst jwt = global.get('jwt');\n\n// --- Step 1: Setup ---\nconst deviceName = msg.device_name;\nconst deviceID = flow.get('deviceID');\nconst dataToVerify = flow.get('dataToVerify');\nconst signature = flow.get('signature');\nconst token = flow.get('jwt');\n\nconst dbPath = \"/etc/mosquitto/certs/update_database.db\";\nconst pragmaKey = env.get(\"DB_PASSWORD\");\n\nlet authenticationStatus = \"\";  // Will be set dynamically\n\n// --- Step 2: Parse SQLCipher result to extract public key ---\nconst publicKey = msg.payload.trim();\nif (!publicKey.startsWith(\"-----BEGIN PUBLIC KEY-----\")) {\n    node.error(\"❌ SQLCipher result is not a valid public key.\");\n    authenticationStatus = \"Signature fail\";\n} else {\n    try {\n        const verifier = crypto.createVerify('sha256');\n        verifier.update(dataToVerify);\n        verifier.end();\n        const isValid = verifier.verify(publicKey, signature, 'base64');\n\n        if (!isValid) {\n            node.warn(\"❌ Signature verification failed.\");\n            authenticationStatus = \"Signature fail\";\n        } else {\n            node.warn(\"✅ Signature verification successful.\");\n\n            // --- Step 3: Verify JWT using Sunny's public key from file + enforce ≤45 min lifetime ---\n            try {\n                const sunnyPublicKeyPath = \"/etc/mosquitto/certs/sunny-public-key.pem\";\n                const sunnyPublicKey = fs.readFileSync(sunnyPublicKeyPath, 'utf8');\n\n                // jwt.verify checks signature & that exp is in the future\n                const decodedJWT = jwt.verify(token, sunnyPublicKey, { algorithms: ['ES256'] });\n\n                // Enforce token lifetime <= 900s (45 min)\n                const iat = Number(decodedJWT.iat || 0);\n                const exp = Number(decodedJWT.exp || 0);\n                const lifetime = exp - iat;\n\n                if (!iat || !exp || lifetime <= 0 || lifetime > 2700) {\n                    node.warn(\"❌ JWT invalid window (must be ≤ 2700s).\");\n                    authenticationStatus = \"JWT fail\";\n                } else if (decodedJWT.device_id !== deviceID) {\n                    node.warn(\"❌ JWT device ID mismatch.\");\n                    authenticationStatus = \"JWT fail\";\n                } else {\n                    node.warn(\"✅ JWT verification successful (≤45 min).\");\n                    authenticationStatus = \"OK\";\n                }\n            } catch (jwtErr) {\n                node.warn(\"❌ JWT verification failed: \" + jwtErr.message);\n                authenticationStatus = \"JWT fail\";\n            }\n        }\n    } catch (sigErr) {\n        node.error(\"❌ Signature verification error: \" + sigErr.message);\n        authenticationStatus = \"Signature fail\";\n    }\n}\n\n// --- Step 4: Save status in flow ---\nflow.set('authentication_status', authenticationStatus);\n\n// --- Step 5: Prepare SQL update only ---\nconst updateSQL = `\nPRAGMA key = '${pragmaKey}';\nUPDATE DeviceProfile \nSET authentication_status = '${authenticationStatus}' \nWHERE device_id = '${deviceID}';\n`;\n\nmsg.payload = `sqlcipher ${dbPath} <<< \"${updateSQL.trim()}\"`;\n\nnode.warn(`📌 authentication_status = \"${authenticationStatus}\" set for device_id: ${deviceID}`);\nconst wifi_SSID = flow.get('wifi_ssid');\nmsg.mqtt_payload = {\n    device_id: deviceID,\n    wifi_SSID: wifi_SSID,\n    authentication_status: authenticationStatus\n};\n\nreturn msg;\n",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 1820,
+        "y": 640,
+        "wires": [
+            [
+                "9354c79075a49546",
+                "9a08dd322fe14549"
+            ]
+        ]
+    },
+    {
+        "id": "9354c79075a49546",
+        "type": "exec",
+        "z": "2a0e24ae5492f4f9",
+        "command": "",
+        "addpay": "payload",
+        "append": "",
+        "useSpawn": "false",
+        "timer": "",
+        "winHide": false,
+        "oldrc": false,
+        "name": "Update Authentication Status",
+        "x": 2260,
+        "y": 640,
+        "wires": [
+            [
+                "2ee0c9ca2f505a65"
+            ],
+            [],
+            []
+        ]
+    },
+    {
+        "id": "2eae86f921d4bcc2",
+        "type": "mqtt in",
+        "z": "2a0e24ae5492f4f9",
+        "name": "Authentication Respond",
+        "topic": "authentication/respond/alice",
+        "qos": "0",
+        "datatype": "auto-detect",
+        "broker": "9cddc1bd885980b7",
+        "nl": false,
+        "rap": true,
+        "rh": 0,
+        "inputs": 0,
+        "x": 340,
+        "y": 820,
+        "wires": [
+            [
+                "93ecd39c7ec78d61"
+            ]
+        ]
+    },
+    {
+        "id": "93ecd39c7ec78d61",
+        "type": "function",
+        "z": "2a0e24ae5492f4f9",
+        "name": "Save MQTT payload in flow and prepare query to update authentication status to select the public-key",
+        "func": "// --- Step 1: Extract payload from MQTT topic ---\nlet topicParts = msg.topic.split(\"/\");\nmsg.device_name = topicParts[2];  // Extract device name from topic\n\n// --- Step 2: Extract values from MQTT payload ---\nconst deviceID = msg.payload.device_id;\nconst token = msg.payload.jwt;\nconst signature = msg.payload.signature;\nconst authentication_status= msg.payload.authentication_status\n// --- Retrieve self device_id from global context ---\nconst selfDeviceID = global.get(\"deviceID\", \"file\");\n\n// --- Step 3: Validate payload ---\nif (!deviceID || !token || !signature || !authentication_status) {\n    node.error(\"❌ Missing required payload values: device_id, jwt, or signature or authentication_status.\");\n    return null;\n}\n\n// --- Step 4: Store values in flow context (do NOT save wifi_SSID) ---\nflow.set('deviceID', deviceID);\nflow.set('jwt', token);\nflow.set('signature', signature);\n\n// --- Step 5: Construct data to verify and store it ---\nconst dataToVerify = `${deviceID}|${token}`;\nflow.set('dataToVerify', dataToVerify);\n\n// --- Step 6: Prepare SQLCipher query to retrieve public_key from DeviceProfile ---\nconst dbPath = \"/etc/mosquitto/certs/update_database.db\";\nconst pragmaKey = env.get(\"DB_PASSWORD\");\n\n// Sanitize deviceID for SQL\nconst safeDeviceID = deviceID.replace(/'/g, \"''\");\nconst updateSQL = `\nPRAGMA key = '${pragmaKey}';\nUPDATE DeviceProfile \nSET authentication_status = '${authentication_status}' \nWHERE device_id = '${selfDeviceID}';\n`;\nconst sqlQuery = `\nPRAGMA key = '${pragmaKey}';\nSELECT public_key FROM Keys WHERE device_id = '${safeDeviceID}';\n`;\n\nmsg.payload = `sqlcipher ${dbPath} <<< \"${sqlQuery.trim()}\\n ${updateSQL.trim()}\"`;\n\nreturn msg;\n",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 790,
+        "y": 660,
+        "wires": [
+            [
+                "f13937e258ae4822"
+            ]
+        ]
+    },
+    {
+        "id": "2ee0c9ca2f505a65",
+        "type": "function",
+        "z": "2a0e24ae5492f4f9",
+        "name": "Prepare MQTT payload for authentication respond-ack",
+        "func": "// ✅ Step 1: Get device name\nconst deviceName = msg.device_name;\nconst deviceID = flow.get('deviceID');\nconst authentication_status = flow.get('authentication_status');\nmsg.topic = `authentication/respond_ack/${deviceName}`;\n\nconst wifi_SSID = flow.get('wifi_ssid');\n\nif (!wifi_SSID) {\n    node.warn(\"⚠️ wifi_SSID not set in flow context.\");\n} else {\n    //node.warn(\"✅ Retrieved wifi_SSID from flow context: \" + wifi_SSID);\n}\n// --- Step 5: Prepare MQTT payload ---\nmsg.payload = {\n    device_id: deviceID,\n    wifi_SSID: wifi_SSID || \"UNKNOWN\",\n    authentication_status: authentication_status\n};\n\nreturn msg;",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 2600,
+        "y": 640,
+        "wires": [
+            [
+                "1a36ac546614ccf2"
+            ]
+        ]
+    },
+    {
+        "id": "8cec172b314d43c9",
+        "type": "mqtt out",
+        "z": "2a0e24ae5492f4f9",
+        "name": "Authentication Ack to Sunny",
+        "topic": "",
+        "qos": "0",
+        "retain": "",
+        "respTopic": "",
+        "contentType": "",
+        "userProps": "",
+        "correl": "",
+        "expiry": "",
+        "broker": "72399054283f9843",
+        "x": 3400,
+        "y": 520,
+        "wires": []
+    },
+    {
+        "id": "714efb57a4e40608",
+        "type": "mqtt out",
+        "z": "2a0e24ae5492f4f9",
+        "name": "Authentication Ack to Cookie",
+        "topic": "",
+        "qos": "0",
+        "retain": "",
+        "respTopic": "",
+        "contentType": "",
+        "userProps": "",
+        "correl": "",
+        "expiry": "",
+        "broker": "fcc9581fb1cd01fb",
+        "x": 3480,
+        "y": 620,
+        "wires": []
+    },
+    {
+        "id": "9a08dd322fe14549",
+        "type": "change",
+        "z": "2a0e24ae5492f4f9",
+        "name": "",
+        "rules": [
+            {
+                "t": "set",
+                "p": "payload",
+                "pt": "msg",
+                "to": "msg.mqtt_payload",
+                "tot": "jsonata"
+            }
+        ],
+        "action": "",
+        "property": "",
+        "from": "",
+        "to": "",
+        "reg": false,
+        "x": 1740,
+        "y": 560,
+        "wires": [
+            [
+                "86ed9263273f286c"
+            ]
+        ]
+    },
+    {
+        "id": "fd1271f763e69280",
+        "type": "mqtt out",
+        "z": "2a0e24ae5492f4f9",
+        "name": "Sync Authentication Status",
+        "topic": "sync/database/deviceprofile/auth",
+        "qos": "0",
+        "retain": "",
+        "respTopic": "",
+        "contentType": "",
+        "userProps": "",
+        "correl": "",
+        "expiry": "",
+        "broker": "9cddc1bd885980b7",
+        "x": 2500,
+        "y": 460,
+        "wires": []
+    },
+    {
+        "id": "526b5992b12ed1c7",
+        "type": "mqtt out",
+        "z": "2a0e24ae5492f4f9",
+        "name": "Authentication Request to Cookie",
+        "topic": "authentication/request/alice",
+        "qos": "0",
+        "retain": "",
+        "respTopic": "",
+        "contentType": "",
+        "userProps": "",
+        "correl": "",
+        "expiry": "",
+        "broker": "fcc9581fb1cd01fb",
+        "x": 2120,
+        "y": 300,
+        "wires": []
+    },
+    {
+        "id": "7530c3483b2ba561",
+        "type": "mqtt out",
+        "z": "2a0e24ae5492f4f9",
+        "name": "Authentication Request to Cake",
+        "topic": "authentication/request/alice",
+        "qos": "0",
+        "retain": "",
+        "respTopic": "",
+        "contentType": "",
+        "userProps": "",
+        "correl": "",
+        "expiry": "",
+        "broker": "d7e23934af9f8ad1",
+        "x": 2110,
+        "y": 360,
+        "wires": []
+    },
+    {
+        "id": "44cc0d9fb123a113",
+        "type": "mqtt in",
+        "z": "2a0e24ae5492f4f9",
+        "name": "Authentication Respond",
+        "topic": "authentication/respond/alice",
+        "qos": "0",
+        "datatype": "auto-detect",
+        "broker": "d7e23934af9f8ad1",
+        "nl": false,
+        "rap": true,
+        "rh": 0,
+        "inputs": 0,
+        "x": 320,
+        "y": 540,
+        "wires": [
+            [
+                "93ecd39c7ec78d61"
+            ]
+        ]
+    },
+    {
+        "id": "74da3486326067df",
+        "type": "mqtt out",
+        "z": "2a0e24ae5492f4f9",
+        "name": "Authentication Ack to Cake",
+        "topic": "",
+        "qos": "0",
+        "retain": "",
+        "respTopic": "",
+        "contentType": "",
+        "userProps": "",
+        "correl": "",
+        "expiry": "",
+        "broker": "fc5713ddc872ba82",
+        "x": 3480,
+        "y": 680,
+        "wires": []
+    },
+    {
+        "id": "0abef4f193e6d227",
+        "type": "delay",
+        "z": "2a0e24ae5492f4f9",
+        "name": "",
+        "pauseType": "delay",
+        "timeout": "20",
+        "timeoutUnits": "seconds",
+        "rate": "1",
+        "nbRateUnits": "1",
+        "rateUnits": "second",
+        "randomFirst": "1",
+        "randomLast": "5",
+        "randomUnits": "seconds",
+        "drop": false,
+        "allowrate": false,
+        "outputs": 1,
+        "x": 2400,
+        "y": 380,
+        "wires": [
+            [
+                "eda8da0628d7853d"
+            ]
+        ]
+    },
+    {
+        "id": "7fdc8b2eb6a8eedd",
+        "type": "comment",
+        "z": "2a0e24ae5492f4f9",
+        "name": "Do mutal authencation for host device and update authentication status in database",
+        "info": "",
+        "x": 510,
+        "y": 460,
+        "wires": []
+    },
+    {
+        "id": "b8fb6e5a0140bfdd",
+        "type": "comment",
+        "z": "2a0e24ae5492f4f9",
+        "name": "MQTT Client (Alice)",
+        "info": "",
+        "x": 370,
+        "y": 200,
+        "wires": []
+    },
+    {
+        "id": "f9661510eddf2213",
+        "type": "inject",
+        "z": "2a0e24ae5492f4f9",
+        "name": "",
+        "props": [
+            {
+                "p": "payload"
+            },
+            {
+                "p": "topic",
+                "vt": "str"
+            }
+        ],
+        "repeat": "30",
+        "crontab": "",
+        "once": true,
+        "onceDelay": 0.1,
+        "topic": "",
+        "payload": "",
+        "payloadType": "date",
+        "x": 1370,
+        "y": 940,
+        "wires": [
+            [
+                "00db38bf329e96b6"
+            ]
+        ]
+    },
+    {
+        "id": "00db38bf329e96b6",
+        "type": "mqtt out",
+        "z": "2a0e24ae5492f4f9",
+        "name": "heartbeat",
+        "topic": "devices/alice/heartbeat",
+        "qos": "",
+        "retain": "",
+        "respTopic": "",
+        "contentType": "",
+        "userProps": "",
+        "correl": "",
+        "expiry": "",
+        "broker": "873502a2020d1559",
+        "x": 1600,
+        "y": 920,
+        "wires": []
+    },
+    {
+        "id": "f61f8169ab3af61f",
+        "type": "switch",
+        "z": "2a0e24ae5492f4f9",
+        "name": "Send MQTTS payload according to SSID connected",
+        "property": "payload.wifi_SSID",
+        "propertyType": "msg",
+        "rules": [
+            {
+                "t": "eq",
+                "v": "Network-01",
+                "vt": "str"
+            },
+            {
+                "t": "eq",
+                "v": "Network-02",
+                "vt": "str"
+            },
+            {
+                "t": "eq",
+                "v": "Network-A",
+                "vt": "str"
+            },
+            {
+                "t": "eq",
+                "v": "Network-B",
+                "vt": "str"
+            }
+        ],
+        "checkall": "true",
+        "repair": false,
+        "outputs": 4,
+        "x": 1660,
+        "y": 300,
+        "wires": [
+            [
+                "5e9ed4d99552d292"
+            ],
+            [
+                "5e9ed4d99552d292"
+            ],
+            [
+                "526b5992b12ed1c7"
+            ],
+            [
+                "7530c3483b2ba561"
+            ]
+        ]
+    },
+    {
+        "id": "86ed9263273f286c",
+        "type": "switch",
+        "z": "2a0e24ae5492f4f9",
+        "name": "Send MQTTS payload according to SSID connected",
+        "property": "payload.wifi_SSID",
+        "propertyType": "msg",
+        "rules": [
+            {
+                "t": "eq",
+                "v": "Network-01",
+                "vt": "str"
+            },
+            {
+                "t": "eq",
+                "v": "Network-02",
+                "vt": "str"
+            },
+            {
+                "t": "eq",
+                "v": "Network-A",
+                "vt": "str"
+            },
+            {
+                "t": "eq",
+                "v": "Network-B",
+                "vt": "str"
+            }
+        ],
+        "checkall": "true",
+        "repair": false,
+        "outputs": 4,
+        "x": 1900,
+        "y": 480,
+        "wires": [
+            [
+                "0abef4f193e6d227"
+            ],
+            [
+                "0abef4f193e6d227"
+            ],
+            [
+                "98204c3b281de4d4"
+            ],
+            [
+                "08a69b9d59dee8ce"
+            ]
+        ]
+    },
+    {
+        "id": "8d921f74304f1d23",
+        "type": "mqtt out",
+        "z": "2a0e24ae5492f4f9",
+        "name": "Sync Authentication Status",
+        "topic": "sync/database/deviceprofile/auth",
+        "qos": "0",
+        "retain": "",
+        "respTopic": "",
+        "contentType": "",
+        "userProps": "",
+        "correl": "",
+        "expiry": "",
+        "broker": "d7e23934af9f8ad1",
+        "x": 2480,
+        "y": 540,
+        "wires": []
+    },
+    {
+        "id": "eda8da0628d7853d",
+        "type": "mqtt out",
+        "z": "2a0e24ae5492f4f9",
+        "name": "Sync Authentication Status",
+        "topic": "sync/database/deviceprofile/auth",
+        "qos": "0",
+        "retain": "",
+        "respTopic": "",
+        "contentType": "",
+        "userProps": "",
+        "correl": "",
+        "expiry": "",
+        "broker": "1dbac324dcb7ed48",
+        "x": 2640,
+        "y": 400,
+        "wires": []
+    },
+    {
+        "id": "98204c3b281de4d4",
+        "type": "delay",
+        "z": "2a0e24ae5492f4f9",
+        "name": "",
+        "pauseType": "delay",
+        "timeout": "20",
+        "timeoutUnits": "seconds",
+        "rate": "1",
+        "nbRateUnits": "1",
+        "rateUnits": "second",
+        "randomFirst": "1",
+        "randomLast": "5",
+        "randomUnits": "seconds",
+        "drop": false,
+        "allowrate": false,
+        "outputs": 1,
+        "x": 2280,
+        "y": 460,
+        "wires": [
+            [
+                "fd1271f763e69280"
+            ]
+        ]
+    },
+    {
+        "id": "08a69b9d59dee8ce",
+        "type": "delay",
+        "z": "2a0e24ae5492f4f9",
+        "name": "",
+        "pauseType": "delay",
+        "timeout": "20",
+        "timeoutUnits": "seconds",
+        "rate": "1",
+        "nbRateUnits": "1",
+        "rateUnits": "second",
+        "randomFirst": "1",
+        "randomLast": "5",
+        "randomUnits": "seconds",
+        "drop": false,
+        "allowrate": false,
+        "outputs": 1,
+        "x": 2240,
+        "y": 520,
+        "wires": [
+            [
+                "8d921f74304f1d23"
+            ]
+        ]
+    },
+    {
+        "id": "1a36ac546614ccf2",
+        "type": "switch",
+        "z": "2a0e24ae5492f4f9",
+        "name": "Send MQTTS payload according to SSID connected",
+        "property": "payload.wifi_SSID",
+        "propertyType": "msg",
+        "rules": [
+            {
+                "t": "eq",
+                "v": "Network-01",
+                "vt": "str"
+            },
+            {
+                "t": "eq",
+                "v": "Network-02",
+                "vt": "str"
+            },
+            {
+                "t": "eq",
+                "v": "Network-A",
+                "vt": "str"
+            },
+            {
+                "t": "eq",
+                "v": "Network-B",
+                "vt": "str"
+            }
+        ],
+        "checkall": "true",
+        "repair": false,
+        "outputs": 4,
+        "x": 3040,
+        "y": 580,
+        "wires": [
+            [
+                "8cec172b314d43c9"
+            ],
+            [
+                "8cec172b314d43c9"
+            ],
+            [
+                "714efb57a4e40608"
+            ],
+            [
+                "74da3486326067df"
+            ]
+        ]
+    },
+    {
+        "id": "72399054283f9843",
+        "type": "mqtt-broker",
+        "name": "",
+        "broker": "192.168.151.1",
+        "port": "8883",
+        "tls": "b6e1278c5d544171",
+        "clientid": "",
+        "autoConnect": true,
+        "usetls": true,
+        "protocolVersion": 4,
+        "keepalive": 60,
+        "cleansession": true,
+        "autoUnsubscribe": true,
+        "birthTopic": "",
+        "birthQos": "0",
+        "birthRetain": "false",
+        "birthPayload": "",
+        "birthMsg": {},
+        "closeTopic": "",
+        "closeQos": "0",
+        "closeRetain": "false",
+        "closePayload": "",
+        "closeMsg": {},
+        "willTopic": "",
+        "willQos": "0",
+        "willRetain": "false",
+        "willPayload": "",
+        "willMsg": {},
+        "userProps": "",
+        "sessionExpiry": ""
+    },
+    {
+        "id": "1dbac324dcb7ed48",
+        "type": "mqtt-broker",
+        "name": "",
+        "broker": "192.168.151.1",
+        "port": "8883",
+        "tls": "39cd027928eb4a94",
+        "clientid": "",
+        "autoConnect": true,
+        "usetls": true,
+        "protocolVersion": 4,
+        "keepalive": 60,
+        "cleansession": true,
+        "autoUnsubscribe": true,
+        "birthTopic": "",
+        "birthQos": "0",
+        "birthRetain": "false",
+        "birthPayload": "",
+        "birthMsg": {},
+        "closeTopic": "",
+        "closeQos": "0",
+        "closeRetain": "false",
+        "closePayload": "",
+        "closeMsg": {},
+        "willTopic": "",
+        "willQos": "0",
+        "willRetain": "false",
+        "willPayload": "",
+        "willMsg": {},
+        "userProps": "",
+        "sessionExpiry": ""
+    },
+    {
+        "id": "9cddc1bd885980b7",
+        "type": "mqtt-broker",
+        "name": "",
+        "broker": "192.168.153.1",
+        "port": "8883",
+        "tls": "4e3e159d8e243951",
+        "clientid": "",
+        "autoConnect": true,
+        "usetls": true,
+        "protocolVersion": 4,
+        "keepalive": 60,
+        "cleansession": true,
+        "autoUnsubscribe": true,
+        "birthTopic": "",
+        "birthQos": "0",
+        "birthRetain": "false",
+        "birthPayload": "",
+        "birthMsg": {},
+        "closeTopic": "",
+        "closeQos": "0",
+        "closeRetain": "false",
+        "closePayload": "",
+        "closeMsg": {},
+        "willTopic": "",
+        "willQos": "0",
+        "willRetain": "false",
+        "willPayload": "",
+        "willMsg": {},
+        "userProps": "",
+        "sessionExpiry": ""
+    },
+    {
+        "id": "fcc9581fb1cd01fb",
+        "type": "mqtt-broker",
+        "name": "",
+        "broker": "192.168.153.1",
+        "port": "8883",
+        "tls": "2a0ac1241fc34ca9",
+        "clientid": "",
+        "autoConnect": true,
+        "usetls": true,
+        "protocolVersion": 4,
+        "keepalive": 60,
+        "cleansession": true,
+        "autoUnsubscribe": true,
+        "birthTopic": "",
+        "birthQos": "0",
+        "birthRetain": "false",
+        "birthPayload": "",
+        "birthMsg": {},
+        "closeTopic": "",
+        "closeQos": "0",
+        "closeRetain": "false",
+        "closePayload": "",
+        "closeMsg": {},
+        "willTopic": "",
+        "willQos": "0",
+        "willRetain": "false",
+        "willPayload": "",
+        "willMsg": {},
+        "userProps": "",
+        "sessionExpiry": ""
+    },
+    {
+        "id": "d7e23934af9f8ad1",
+        "type": "mqtt-broker",
+        "name": "",
+        "broker": "192.168.154.1",
+        "port": "8883",
+        "tls": "f9d2c83bebecb3ef",
+        "clientid": "",
+        "autoConnect": true,
+        "usetls": true,
+        "protocolVersion": 4,
+        "keepalive": 60,
+        "cleansession": true,
+        "autoUnsubscribe": true,
+        "birthTopic": "",
+        "birthQos": "0",
+        "birthRetain": "false",
+        "birthPayload": "",
+        "birthMsg": {},
+        "closeTopic": "",
+        "closeQos": "0",
+        "closeRetain": "false",
+        "closePayload": "",
+        "closeMsg": {},
+        "willTopic": "",
+        "willQos": "0",
+        "willRetain": "false",
+        "willPayload": "",
+        "willMsg": {},
+        "userProps": "",
+        "sessionExpiry": ""
+    },
+    {
+        "id": "fc5713ddc872ba82",
+        "type": "mqtt-broker",
+        "name": "",
+        "broker": "192.168.154.1",
+        "port": "8883",
+        "tls": "197fbcc39e6717c7",
+        "clientid": "",
+        "autoConnect": true,
+        "usetls": true,
+        "protocolVersion": 4,
+        "keepalive": 60,
+        "cleansession": true,
+        "autoUnsubscribe": true,
+        "birthTopic": "",
+        "birthQos": "0",
+        "birthRetain": "false",
+        "birthPayload": "",
+        "birthMsg": {},
+        "closeTopic": "",
+        "closeQos": "0",
+        "closeRetain": "false",
+        "closePayload": "",
+        "closeMsg": {},
+        "willTopic": "",
+        "willQos": "0",
+        "willRetain": "false",
+        "willPayload": "",
+        "willMsg": {},
+        "userProps": "",
+        "sessionExpiry": ""
+    },
+    {
+        "id": "873502a2020d1559",
+        "type": "mqtt-broker",
+        "name": "",
+        "broker": "192.168.151.1",
+        "port": "1883",
+        "clientid": "",
+        "autoConnect": true,
+        "usetls": false,
+        "protocolVersion": "4",
+        "keepalive": "60",
+        "cleansession": true,
+        "autoUnsubscribe": true,
+        "birthTopic": "",
+        "birthQos": "0",
+        "birthRetain": "false",
+        "birthPayload": "",
+        "birthMsg": {},
+        "closeTopic": "",
+        "closeQos": "0",
+        "closeRetain": "false",
+        "closePayload": "",
+        "closeMsg": {},
+        "willTopic": "",
+        "willQos": "0",
+        "willRetain": "false",
+        "willPayload": "",
+        "willMsg": {},
+        "userProps": "",
+        "sessionExpiry": ""
+    },
+    {
+        "id": "b6e1278c5d544171",
+        "type": "tls-config",
+        "name": "",
+        "cert": "/etc/mosquitto/certs/alice.pem",
+        "key": "/etc/mosquitto/certs/alice-key.pem",
+        "ca": "/etc/mosquitto/certs/MQTTS.pem",
+        "certname": "",
+        "keyname": "",
+        "caname": "",
+        "servername": "sunny",
+        "verifyservercert": true,
+        "alpnprotocol": ""
+    },
+    {
+        "id": "39cd027928eb4a94",
+        "type": "tls-config",
+        "name": "",
+        "cert": "/etc/mosquitto/certs/alice.pem",
+        "key": "/etc/mosquitto/certs/alice-key.pem",
+        "ca": "/etc/mosquitto/certs/MQTTS.pem",
+        "certname": "",
+        "keyname": "",
+        "caname": "",
+        "servername": "sunny",
+        "verifyservercert": true,
+        "alpnprotocol": ""
+    },
+    {
+        "id": "4e3e159d8e243951",
+        "type": "tls-config",
+        "name": "",
+        "cert": "/etc/mosquitto/certs/alice.pem",
+        "key": "/etc/mosquitto/certs/alice-key.pem",
+        "ca": "/etc/mosquitto/certs/MQTTS.pem",
+        "certname": "",
+        "keyname": "",
+        "caname": "",
+        "servername": "cookie",
+        "verifyservercert": true,
+        "alpnprotocol": ""
+    },
+    {
+        "id": "2a0ac1241fc34ca9",
+        "type": "tls-config",
+        "name": "",
+        "cert": "/etc/mosquitto/certs/alice.pem",
+        "key": "/etc/mosquitto/certs/alice-key.pem",
+        "ca": "/etc/mosquitto/certs/MQTTS.pem",
+        "certname": "",
+        "keyname": "",
+        "caname": "",
+        "servername": "cookie",
+        "verifyservercert": true,
+        "alpnprotocol": ""
+    },
+    {
+        "id": "f9d2c83bebecb3ef",
+        "type": "tls-config",
+        "name": "",
+        "cert": "/etc/mosquitto/certs/alice.pem",
+        "key": "/etc/mosquitto/certs/alice-key.pem",
+        "ca": "/etc/mosquitto/certs/MQTTS.pem",
+        "certname": "",
+        "keyname": "",
+        "caname": "",
+        "servername": "cake",
+        "verifyservercert": true,
+        "alpnprotocol": ""
+    },
+    {
+        "id": "197fbcc39e6717c7",
+        "type": "tls-config",
+        "name": "",
+        "cert": "/etc/mosquitto/certs/alice.pem",
+        "key": "/etc/mosquitto/certs/alice-key.pem",
+        "ca": "/etc/mosquitto/certs/MQTTS.pem",
+        "certname": "",
+        "keyname": "",
+        "caname": "",
+        "servername": "cake",
+        "verifyservercert": true,
+        "alpnprotocol": ""
+    }
+]

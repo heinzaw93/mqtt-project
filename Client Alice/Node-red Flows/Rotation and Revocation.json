@@ -1,0 +1,718 @@
+[
+    {
+        "id": "92c2c8e23ced6541",
+        "type": "tab",
+        "label": "Rotation and Revocation",
+        "disabled": false,
+        "info": "",
+        "env": []
+    },
+    {
+        "id": "8727d2724f75c42b",
+        "type": "mqtt in",
+        "z": "92c2c8e23ced6541",
+        "name": "Renew ECC keys",
+        "topic": "renew/ECC/alice",
+        "qos": "0",
+        "datatype": "auto-detect",
+        "broker": "23d7aa02f5d504e9",
+        "nl": false,
+        "rap": true,
+        "rh": 0,
+        "inputs": 0,
+        "x": 400,
+        "y": 1360,
+        "wires": [
+            [
+                "6ba2b4d59a58a3d6",
+                "36dcdf215e738a63"
+            ]
+        ]
+    },
+    {
+        "id": "6ba2b4d59a58a3d6",
+        "type": "function",
+        "z": "92c2c8e23ced6541",
+        "name": "Match ID",
+        "func": "// === Step 1: Get stored device_id from global ===\nconst storedDeviceId = global.get(\"deviceID\", \"file\");   // from global.set(..., 'file')\n\n// === Step 2: Get incoming device_id ===\nconst incomingDeviceId = msg.payload.device_id;\n\n// === Step 3: Compare ===\nif (storedDeviceId && incomingDeviceId && storedDeviceId === incomingDeviceId) {\n    // ✅ IDs match\n    const deviceName = msg.payload.device_name || \"unknown\";\n     flow.set('deviceName', deviceName);\n    const privateKeyPath = `/etc/mosquitto/certs/${deviceName}-private-key.pem`;\n\n    // Exec node needs plain string\n    msg.payload = `openssl ecparam -genkey -name prime256v1 -out ${privateKeyPath}`;\n\n    return msg;\n} else {\n    node.warn(`❌ Device ID mismatch! Stored=${storedDeviceId}, Incoming=${incomingDeviceId}`);\n    return null;\n}\n",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 640,
+        "y": 1320,
+        "wires": [
+            [
+                "6128bbd80c2be930"
+            ]
+        ]
+    },
+    {
+        "id": "6128bbd80c2be930",
+        "type": "exec",
+        "z": "92c2c8e23ced6541",
+        "command": "",
+        "addpay": "payload",
+        "append": "",
+        "useSpawn": "false",
+        "timer": "",
+        "winHide": false,
+        "oldrc": false,
+        "name": "Alice private key creation",
+        "x": 850,
+        "y": 1240,
+        "wires": [
+            [
+                "49f31b123e903271"
+            ],
+            [],
+            []
+        ]
+    },
+    {
+        "id": "492a34aa1a33a357",
+        "type": "exec",
+        "z": "92c2c8e23ced6541",
+        "command": "",
+        "addpay": "payload",
+        "append": "",
+        "useSpawn": "false",
+        "timer": "",
+        "winHide": false,
+        "oldrc": false,
+        "name": "Insert Data Into Keys Table",
+        "x": 1740,
+        "y": 1260,
+        "wires": [
+            [],
+            [],
+            []
+        ]
+    },
+    {
+        "id": "69f8d5e27d26efaf",
+        "type": "change",
+        "z": "92c2c8e23ced6541",
+        "name": "Set MQTTS Payload to sync database",
+        "rules": [
+            {
+                "t": "set",
+                "p": "payload",
+                "pt": "msg",
+                "to": "msg.mqtt_payload",
+                "tot": "jsonata"
+            }
+        ],
+        "action": "",
+        "property": "",
+        "from": "",
+        "to": "",
+        "reg": false,
+        "x": 1430,
+        "y": 1360,
+        "wires": [
+            [
+                "baa6e6e54987e419"
+            ]
+        ]
+    },
+    {
+        "id": "baa6e6e54987e419",
+        "type": "mqtt out",
+        "z": "92c2c8e23ced6541",
+        "name": "Sync Keys Table",
+        "topic": "sync/data/keys_",
+        "qos": "0",
+        "retain": "",
+        "respTopic": "",
+        "contentType": "",
+        "userProps": "",
+        "correl": "",
+        "expiry": "",
+        "broker": "873502a2020d1559",
+        "x": 1480,
+        "y": 1420,
+        "wires": []
+    },
+    {
+        "id": "9b79d9e836c316df",
+        "type": "function",
+        "z": "92c2c8e23ced6541",
+        "name": "Read keys and prepare data for Keys Table",
+        "func": "// --- Simple combined function ---\n// 1) Read files -> put in global\n// 2) Build SQL -> put string cmd into msg.payload\n\nconst fs = global.get('fs');\nif (!fs) { node.error(\"fs not found in global (set with global.set('fs', require('fs')) )\"); return null; }\n\nconst dbPath     = \"/etc/mosquitto/certs/update_database.db\";\nconst pragmaKey  = env.get(\"DB_PASSWORD\");\nif (!pragmaKey) { node.error(\"DB_PASSWORD env not set\"); return null; }\n\n// === Paths ===\nconst publicKeyPath  = \"/etc/mosquitto/certs/alice-public-key.pem\";\nconst privateKeyPath = \"/etc/mosquitto/certs/alice-private-key.pem\";\nconst secretKeyPath  = \"/etc/mosquitto/certs/alice-registration-secret-key.bin\";\n\n// --- Step 1: Read PEMs and store to global ---\nlet publicKey, privateKey;\ntry {\n  publicKey  = fs.readFileSync(publicKeyPath, 'utf8').trim();\n  privateKey = fs.readFileSync(privateKeyPath, 'utf8').trim();\n} catch (e) {\n  node.error(\"Read PEM failed: \" + e.message);\n  return null;\n}\nglobal.set(\"public_key\",  publicKey,  \"file\");\nglobal.set(\"private_key\", privateKey, \"file\");\n\n// --- Step 2: Get deviceID (already set elsewhere) ---\nconst deviceID = global.get(\"deviceID\", \"file\");\nif (!deviceID) { node.error(\"deviceID not found in global context\"); return null; }\n\n// --- Step 3: Read registration secret (binary) ---\nlet secretBuf;\ntry {\n  secretBuf = fs.readFileSync(secretKeyPath);  // raw binary\n} catch (e) {\n  node.error(\"Read registration secret failed: \" + e.message);\n  return null;\n}\nconst secretHex = secretBuf.toString('hex');\n\n// --- Step 4: Build SQL (escape single quotes in PEMs) ---\nconst esc = s => s.replace(/'/g, \"''\");\nconst sql = `\nPRAGMA key='${pragmaKey}';\nINSERT OR REPLACE INTO Keys (device_id, private_key, public_key, registration_key)\nVALUES ('${esc(deviceID)}', '${esc(privateKey)}', '${esc(publicKey)}', X'${secretHex}');\n`.trim();\n\nconst deviceName=flow.get('deviceName');\n// --- Step 5: Prepare exec command (must be a plain string) ---\nmsg.payload = `sqlcipher ${dbPath} <<< \"${sql}\"`;\n\n// (Optional) also attach MQTT payload\nmsg.mqtt_payload = {\n    device_id: deviceID,\n    devicename:deviceName,\n    public_key: publicKey\n    // Optionally, use Base64 instead: secretKeyBuffer.toString('base64')\n};\nnode.warn(`✅ ECC key updated for  ${deviceName} device_id: ${deviceID}`);\nreturn msg;\n",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 1330,
+        "y": 1240,
+        "wires": [
+            [
+                "492a34aa1a33a357",
+                "69f8d5e27d26efaf"
+            ]
+        ]
+    },
+    {
+        "id": "49f31b123e903271",
+        "type": "exec",
+        "z": "92c2c8e23ced6541",
+        "command": "openssl ec -in /etc/mosquitto/certs/alice-private-key.pem -pubout -out /etc/mosquitto/certs/alice-public-key.pem",
+        "addpay": "",
+        "append": "",
+        "useSpawn": "false",
+        "timer": "",
+        "winHide": false,
+        "oldrc": false,
+        "name": "Create Alice Public Key ",
+        "x": 1050,
+        "y": 1320,
+        "wires": [
+            [
+                "9b79d9e836c316df"
+            ],
+            [],
+            []
+        ]
+    },
+    {
+        "id": "02047e1a6d88f576",
+        "type": "comment",
+        "z": "92c2c8e23ced6541",
+        "name": "Renew Keys",
+        "info": "",
+        "x": 390,
+        "y": 1280,
+        "wires": []
+    },
+    {
+        "id": "36dcdf215e738a63",
+        "type": "debug",
+        "z": "92c2c8e23ced6541",
+        "name": "debug 1",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "false",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 560,
+        "y": 1400,
+        "wires": []
+    },
+    {
+        "id": "f123e34cbf1d36ad",
+        "type": "function",
+        "z": "92c2c8e23ced6541",
+        "name": "Prepare to Select JWT",
+        "func": "const dbPath = \"/etc/mosquitto/certs/update_database.db\";\nconst pragmaKey = env.get(\"DB_PASSWORD\");\n\n// --- Step 1: Get deviceID from global context ---\nlet deviceID = global.get(\"deviceID\", \"file\");\nif (!deviceID) {\n    node.error(\"❌ deviceID not found in global context.\");\n    return null;\n}\n\n// --- Step 2: Escape single quotes ---\ndeviceID = deviceID.replace(/'/g, \"''\");\n\n// --- Step 3: Build SELECT query (only jwt_token) ---\nconst sqlSelect = `\nPRAGMA key = '${pragmaKey}';\nSELECT jwt_token \nFROM DeviceProfile \nWHERE device_id = '${deviceID}';\n`;\n\n// --- Step 4: Send command to exec node ---\nmsg.payload = `sqlcipher ${dbPath} <<< \"${sqlSelect.trim()}\"`;\n\nreturn msg;\n",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 700,
+        "y": 920,
+        "wires": [
+            [
+                "2058ce1c65a3cece"
+            ]
+        ]
+    },
+    {
+        "id": "436fd2fa5e170c48",
+        "type": "mqtt in",
+        "z": "92c2c8e23ced6541",
+        "name": "Revoke MQTTS",
+        "topic": "revoke/MQTTS/alice",
+        "qos": "0",
+        "datatype": "auto-detect",
+        "broker": "fcc9581fb1cd01fb",
+        "nl": false,
+        "rap": true,
+        "rh": 0,
+        "inputs": 0,
+        "x": 380,
+        "y": 580,
+        "wires": [
+            [
+                "0ad084f581f0eacb"
+            ]
+        ]
+    },
+    {
+        "id": "0ad084f581f0eacb",
+        "type": "function",
+        "z": "92c2c8e23ced6541",
+        "name": "Prepare bootstrap to trust CA",
+        "func": "const fs = global.get('fs');\nconst caUrl = msg.payload.ca_url;\nconst fp    = msg.payload.fingerprint;\nconst prov_pass = msg.payload.prov_pass;\nconst MQTTS_CA_Certificate =msg.payload.MQTTS_CA_Certificate;\nconst prov_pass_path = \"/etc/mosquitto/certs/provisioner_password\";\nconst MQTTScertFilePath = \"/etc/mosquitto/certs/MQTTS.pem\";\nfs.writeFileSync(prov_pass_path, prov_pass, 'utf8');\nfs.writeFileSync(MQTTScertFilePath, MQTTS_CA_Certificate, 'utf8');\nif (!caUrl || !fp) {\n  node.error('Missing ca_url or fingerprint in Payload');\n  return null;\n}\n\n// One single line, no line breaks:\nmsg.payload = `step ca bootstrap --ca-url \"${caUrl}\" --fingerprint \"${fp}\" --install --force`;\n\nreturn msg;\n",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 680,
+        "y": 580,
+        "wires": [
+            [
+                "9ec8153ea96deb81"
+            ]
+        ]
+    },
+    {
+        "id": "9ec8153ea96deb81",
+        "type": "exec",
+        "z": "92c2c8e23ced6541",
+        "command": "",
+        "addpay": "payload",
+        "append": "",
+        "useSpawn": "false",
+        "timer": "",
+        "winHide": false,
+        "oldrc": false,
+        "name": "Trust CA",
+        "x": 800,
+        "y": 680,
+        "wires": [
+            [
+                "52c1ecebf7b638e6"
+            ],
+            [],
+            []
+        ]
+    },
+    {
+        "id": "52c1ecebf7b638e6",
+        "type": "function",
+        "z": "92c2c8e23ced6541",
+        "name": "Prepare to create MQTTS key and certificate",
+        "func": "const fs = global.get('fs');\n\n// --- Step 1: File paths ---\nconst certPath = '/etc/mosquitto/certs/alice.pem';\nconst keyPath = '/etc/mosquitto/certs/alice-key.pem';\nconst provPassFile = '/etc/mosquitto/certs/provisioner_password';\n\n// --- Step 2: Prepare step-ca command for Exec node ---\nmsg.payload = `step ca certificate alice \\\n${certPath} \\\n${keyPath} \\\n--provisioner \"Admin JWK\" \\\n--provisioner-password-file ${provPassFile} \\\n--force`;\nnode.warn(`✅ Renew MQTTS credential for Alice`);\nreturn msg;\n",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 1070,
+        "y": 580,
+        "wires": [
+            [
+                "8f6f98ea6d7af7d1"
+            ]
+        ]
+    },
+    {
+        "id": "8f6f98ea6d7af7d1",
+        "type": "exec",
+        "z": "92c2c8e23ced6541",
+        "command": "",
+        "addpay": "payload",
+        "append": "",
+        "useSpawn": "false",
+        "timer": "",
+        "winHide": false,
+        "oldrc": false,
+        "name": "Create MQTTS key and cerificate",
+        "x": 1100,
+        "y": 680,
+        "wires": [
+            [
+                "031315a0675c0249"
+            ],
+            [],
+            []
+        ]
+    },
+    {
+        "id": "031315a0675c0249",
+        "type": "exec",
+        "z": "92c2c8e23ced6541",
+        "command": "sudo systemctl restart mosquitto-cert-renew.service | sudo systemctl kill -s HUP mosquitto",
+        "addpay": "",
+        "append": "",
+        "useSpawn": "false",
+        "timer": "",
+        "winHide": false,
+        "oldrc": false,
+        "name": "Restart renew service",
+        "x": 1480,
+        "y": 580,
+        "wires": [
+            [],
+            [],
+            []
+        ]
+    },
+    {
+        "id": "658adafb8f62fd82",
+        "type": "inject",
+        "z": "92c2c8e23ced6541",
+        "name": "Renew JWT",
+        "props": [
+            {
+                "p": "payload"
+            },
+            {
+                "p": "topic",
+                "vt": "str"
+            }
+        ],
+        "repeat": "300",
+        "crontab": "",
+        "once": false,
+        "onceDelay": 0.1,
+        "topic": "",
+        "payload": "",
+        "payloadType": "date",
+        "x": 380,
+        "y": 960,
+        "wires": [
+            [
+                "f123e34cbf1d36ad"
+            ]
+        ]
+    },
+    {
+        "id": "2058ce1c65a3cece",
+        "type": "exec",
+        "z": "92c2c8e23ced6541",
+        "command": "",
+        "addpay": "payload",
+        "append": "",
+        "useSpawn": "false",
+        "timer": "",
+        "winHide": false,
+        "oldrc": false,
+        "name": "Select JWT",
+        "x": 910,
+        "y": 920,
+        "wires": [
+            [
+                "c1ec93d250babc9a"
+            ],
+            [],
+            []
+        ]
+    },
+    {
+        "id": "c1ec93d250babc9a",
+        "type": "function",
+        "z": "92c2c8e23ced6541",
+        "name": "Validate JWT expire",
+        "func": "// Input: msg.payload = JWT string (may include surrounding quotes from sqlcipher)\n// Output (when ttl < 60): msg.payload = { device_id, jwt }\n\nconst deviceID = global.get(\"deviceID\", \"file\");\nif (!deviceID) { node.error(\"deviceID not found in global context\"); return null; }\n\n// 1) Get token string\nlet token = (msg.payload ?? \"\").toString().trim();\n// strip surrounding quotes if present\nif (token.startsWith('\"') && token.endsWith('\"')) token = token.slice(1, -1);\n\n// basic check\nif (!token || !token.includes(\".\")) { node.error(\"Invalid JWT\"); return null; }\n\n// 2) Decode base64url payload\nfunction b64urlToJson(b64u) {\n  const b64 = b64u.replace(/-/g, '+').replace(/_/g, '/');\n  const pad = (4 - (b64.length % 4)) % 4;\n  return JSON.parse(Buffer.from(b64 + \"=\".repeat(pad), \"base64\").toString(\"utf8\"));\n}\n\ntry {\n  const parts = token.split(\".\");\n  if (parts.length < 2) { node.error(\"Malformed JWT\"); return null; }\n  const claims = b64urlToJson(parts[1]);\n\n  const now = Math.floor(Date.now() / 1000);\n  const iat = Number(claims.iat || 0);\n  const exp = Number(claims.exp || 0);\n  const ttl = Math.max(0, exp - now);\n\n  if (!iat || !exp) { node.error(\"JWT missing iat/exp\"); return null; }\n\n  if (ttl < 60) {\n    // need refresh -> pass device_id and token forward\n    msg.payload = { device_id: deviceID, jwt: token };\n    return msg;\n  } else {\n    node.warn(`jwt is still valid (ttl_seconds=${ttl})`);\n    return null; // stop here\n  }\n} catch (e) {\n  node.error(\"Failed to decode JWT: \" + e.message);\n  return null;\n}\n",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 1160,
+        "y": 900,
+        "wires": [
+            [
+                "fb3dd3ccd2b63214"
+            ]
+        ]
+    },
+    {
+        "id": "fb3dd3ccd2b63214",
+        "type": "mqtt out",
+        "z": "92c2c8e23ced6541",
+        "name": "Request to renew JWT",
+        "topic": "renew/jwt/alice",
+        "qos": "0",
+        "retain": "",
+        "respTopic": "",
+        "contentType": "",
+        "userProps": "",
+        "correl": "",
+        "expiry": "",
+        "broker": "fcc9581fb1cd01fb",
+        "x": 1400,
+        "y": 900,
+        "wires": []
+    },
+    {
+        "id": "9f2c0e4174ae2171",
+        "type": "mqtt in",
+        "z": "92c2c8e23ced6541",
+        "name": "Respond new JWT",
+        "topic": "respond/jwt/alice",
+        "qos": "0",
+        "datatype": "auto-detect",
+        "broker": "9cddc1bd885980b7",
+        "nl": false,
+        "rap": true,
+        "rh": 0,
+        "inputs": 0,
+        "x": 410,
+        "y": 1120,
+        "wires": [
+            [
+                "e79aae6629cc40ee"
+            ]
+        ]
+    },
+    {
+        "id": "f10d69d1db417b2b",
+        "type": "exec",
+        "z": "92c2c8e23ced6541",
+        "command": "",
+        "addpay": "payload",
+        "append": "",
+        "useSpawn": "false",
+        "timer": "",
+        "winHide": false,
+        "oldrc": false,
+        "name": "Update JWT",
+        "x": 1070,
+        "y": 1100,
+        "wires": [
+            [],
+            [],
+            []
+        ]
+    },
+    {
+        "id": "2a8b0f882d1a33bc",
+        "type": "mqtt in",
+        "z": "92c2c8e23ced6541",
+        "name": "Renew JWT",
+        "topic": "renew/JWT/alice",
+        "qos": "0",
+        "datatype": "auto-detect",
+        "broker": "fcc9581fb1cd01fb",
+        "nl": false,
+        "rap": true,
+        "rh": 0,
+        "inputs": 0,
+        "x": 410,
+        "y": 900,
+        "wires": [
+            [
+                "f123e34cbf1d36ad"
+            ]
+        ]
+    },
+    {
+        "id": "39d5a07e2904364a",
+        "type": "comment",
+        "z": "92c2c8e23ced6541",
+        "name": "MQTT Client (Alice)",
+        "info": "",
+        "x": 390,
+        "y": 500,
+        "wires": []
+    },
+    {
+        "id": "2cef1954990f2781",
+        "type": "comment",
+        "z": "92c2c8e23ced6541",
+        "name": "Revoke MQTTS Certs and Key",
+        "info": "",
+        "x": 430,
+        "y": 540,
+        "wires": []
+    },
+    {
+        "id": "a851323dd954ce90",
+        "type": "comment",
+        "z": "92c2c8e23ced6541",
+        "name": "Renew JWT",
+        "info": "",
+        "x": 390,
+        "y": 840,
+        "wires": []
+    },
+    {
+        "id": "3ef93a8845f49c5e",
+        "type": "comment",
+        "z": "92c2c8e23ced6541",
+        "name": "Recieved new JWT",
+        "info": "",
+        "x": 430,
+        "y": 1060,
+        "wires": []
+    },
+    {
+        "id": "e79aae6629cc40ee",
+        "type": "function",
+        "z": "92c2c8e23ced6541",
+        "name": "Validate JWT and prepare to update database",
+        "func": "const fs        = global.get('fs');\nconst jwt       = global.get('jwt');\nconst crypto    = global.get('crypto');\n\nconst dbPath    = \"/etc/mosquitto/certs/update_database.db\";\nconst pragmaKey = env.get(\"DB_PASSWORD\");\n\n// --- Step 1: Get incoming payload ---\nconst payload          = msg.payload || {};\nconst incomingDeviceId = payload.device_id;\nconst newJwt           = payload.jwt;\nconst signatureB64     = payload.jwt_sig_b64;    // expecting signature field\n\n// --- Step 2: Get stored deviceId ---\nlet storedDeviceId = global.get(\"deviceID\", \"file\");\nif (!storedDeviceId) {\n    node.error(\"❌ deviceID not found in global context\");\n    return null;\n}\n\n// --- Step 3: Compare IDs ---\nif (incomingDeviceId !== storedDeviceId) {\n    node.warn(`❌ Device ID mismatch. Incoming=${incomingDeviceId}, Stored=${storedDeviceId}`);\n    return null;\n}\n\n// --- Step 4: Verify signature over (device_id | jwt) ---\nif (!signatureB64) {\n    node.warn(\"❌ Missing jwt_sig_b64 in payload\");\n    return null;\n}\n\nlet sunnyPub;\ntry {\n    sunnyPub = fs.readFileSync(\"/etc/mosquitto/certs/sunny-public-key.pem\", \"utf8\");\n} catch (e) {\n    node.error(\"❌ Unable to read sunny-public-key.pem: \" + e.message);\n    return null;\n}\n\nconst verify = crypto.createVerify(\"sha256\");\nverify.update(`${incomingDeviceId}|${newJwt}`);\nverify.end();\n\nlet sigOK;\ntry {\n    sigOK = verify.verify(sunnyPub, signatureB64, \"base64\");\n} catch (e) {\n    node.warn(\"❌ Signature verification error: \" + e.message);\n    return null;\n}\n\nif (!sigOK) {\n    node.warn(\"❌ Signature invalid for device_id and jwt.\");\n    return null;\n}\nnode.warn(`✅ Signature verified new JWT come from Sunny for device_id=${incomingDeviceId}`);\n\n// --- Step 5: Escape values for SQL ---\nconst esc = s => (s ?? \"\").toString().replace(/'/g, \"''\");\nconst sqlUpdate = `\nPRAGMA key='${pragmaKey}';\nUPDATE DeviceProfile\nSET jwt_token='${esc(newJwt)}'\nWHERE device_id='${esc(storedDeviceId)}';\n`.trim();\n\n// --- Step 6: Prepare exec payload ---\nmsg.payload = `sqlcipher ${dbPath} <<< \"${sqlUpdate}\"`;\n\nnode.warn(`✅ JWT updated for device_id: ${storedDeviceId}`);\n\nreturn msg;\n",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 760,
+        "y": 1080,
+        "wires": [
+            [
+                "f10d69d1db417b2b"
+            ]
+        ]
+    },
+    {
+        "id": "23d7aa02f5d504e9",
+        "type": "mqtt-broker",
+        "name": "",
+        "broker": "192.168.153.1",
+        "port": 1883,
+        "clientid": "",
+        "autoConnect": true,
+        "usetls": false,
+        "protocolVersion": "4",
+        "keepalive": 60,
+        "cleansession": true,
+        "autoUnsubscribe": true,
+        "birthTopic": "",
+        "birthQos": "0",
+        "birthRetain": "false",
+        "birthPayload": "",
+        "birthMsg": {},
+        "closeTopic": "",
+        "closeQos": "0",
+        "closeRetain": "false",
+        "closePayload": "",
+        "closeMsg": {},
+        "willTopic": "",
+        "willQos": "0",
+        "willRetain": "false",
+        "willPayload": "",
+        "willMsg": {},
+        "userProps": "",
+        "sessionExpiry": ""
+    },
+    {
+        "id": "873502a2020d1559",
+        "type": "mqtt-broker",
+        "name": "",
+        "broker": "192.168.151.1",
+        "port": "1883",
+        "clientid": "",
+        "autoConnect": true,
+        "usetls": false,
+        "protocolVersion": "4",
+        "keepalive": "60",
+        "cleansession": true,
+        "autoUnsubscribe": true,
+        "birthTopic": "",
+        "birthQos": "0",
+        "birthRetain": "false",
+        "birthPayload": "",
+        "birthMsg": {},
+        "closeTopic": "",
+        "closeQos": "0",
+        "closeRetain": "false",
+        "closePayload": "",
+        "closeMsg": {},
+        "willTopic": "",
+        "willQos": "0",
+        "willRetain": "false",
+        "willPayload": "",
+        "willMsg": {},
+        "userProps": "",
+        "sessionExpiry": ""
+    },
+    {
+        "id": "fcc9581fb1cd01fb",
+        "type": "mqtt-broker",
+        "name": "",
+        "broker": "192.168.153.1",
+        "port": "8883",
+        "tls": "2a0ac1241fc34ca9",
+        "clientid": "",
+        "autoConnect": true,
+        "usetls": true,
+        "protocolVersion": 4,
+        "keepalive": 60,
+        "cleansession": true,
+        "autoUnsubscribe": true,
+        "birthTopic": "",
+        "birthQos": "0",
+        "birthRetain": "false",
+        "birthPayload": "",
+        "birthMsg": {},
+        "closeTopic": "",
+        "closeQos": "0",
+        "closeRetain": "false",
+        "closePayload": "",
+        "closeMsg": {},
+        "willTopic": "",
+        "willQos": "0",
+        "willRetain": "false",
+        "willPayload": "",
+        "willMsg": {},
+        "userProps": "",
+        "sessionExpiry": ""
+    },
+    {
+        "id": "9cddc1bd885980b7",
+        "type": "mqtt-broker",
+        "name": "",
+        "broker": "192.168.153.1",
+        "port": "8883",
+        "tls": "4e3e159d8e243951",
+        "clientid": "",
+        "autoConnect": true,
+        "usetls": true,
+        "protocolVersion": 4,
+        "keepalive": 60,
+        "cleansession": true,
+        "autoUnsubscribe": true,
+        "birthTopic": "",
+        "birthQos": "0",
+        "birthRetain": "false",
+        "birthPayload": "",
+        "birthMsg": {},
+        "closeTopic": "",
+        "closeQos": "0",
+        "closeRetain": "false",
+        "closePayload": "",
+        "closeMsg": {},
+        "willTopic": "",
+        "willQos": "0",
+        "willRetain": "false",
+        "willPayload": "",
+        "willMsg": {},
+        "userProps": "",
+        "sessionExpiry": ""
+    },
+    {
+        "id": "2a0ac1241fc34ca9",
+        "type": "tls-config",
+        "name": "",
+        "cert": "/etc/mosquitto/certs/alice.pem",
+        "key": "/etc/mosquitto/certs/alice-key.pem",
+        "ca": "/etc/mosquitto/certs/MQTTS.pem",
+        "certname": "",
+        "keyname": "",
+        "caname": "",
+        "servername": "cookie",
+        "verifyservercert": true,
+        "alpnprotocol": ""
+    },
+    {
+        "id": "4e3e159d8e243951",
+        "type": "tls-config",
+        "name": "",
+        "cert": "/etc/mosquitto/certs/alice.pem",
+        "key": "/etc/mosquitto/certs/alice-key.pem",
+        "ca": "/etc/mosquitto/certs/MQTTS.pem",
+        "certname": "",
+        "keyname": "",
+        "caname": "",
+        "servername": "cookie",
+        "verifyservercert": true,
+        "alpnprotocol": ""
+    }
+]

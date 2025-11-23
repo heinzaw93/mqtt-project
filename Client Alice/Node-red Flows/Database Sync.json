@@ -1,0 +1,377 @@
+[
+    {
+        "id": "bb7e0f360c21e427",
+        "type": "tab",
+        "label": "Data Base Sync",
+        "disabled": false,
+        "info": "",
+        "env": []
+    },
+    {
+        "id": "4b78b333fabfa507",
+        "type": "function",
+        "z": "bb7e0f360c21e427",
+        "name": "Prepare query for DeviceProfile Table to sync",
+        "func": "// --- Step 1: Extract values from MQTT-in payload ---\nconst payload = msg.payload;\nconst deviceId = payload.device_id;\nconst deviceName = payload.device_name;\nconst macAddress1 = payload.mac_address_1 || \"00:00:00:00:00:00\";\nconst macAddress2 = payload.mac_address_2 || \"00:00:00:00:00:00\";\nconst isBroker = payload.is_broker || 0;\nconst authentication_status = payload.authentication_status;\nconst registrationTime = payload.registered_at || Math.floor(Date.now() / 1000);\n\n// --- Step 2: SQLCipher config ---\nconst dbPath = \"/etc/mosquitto/certs/update_database.db\";\nconst pragmaKey = env.get(\"DB_PASSWORD\");\n\n// --- Step 3: Get self device ID from global context ---\nconst selfDeviceID = global.get('deviceID', 'file');\n\n// --- Step 4: Prepare SQL query based on device ID match ---\nlet sqlQuery = \"\";\nif (deviceId === selfDeviceID) {\n    // Case 1: Device IDs match → INSERT only\n    sqlQuery = `\n    PRAGMA key = '${pragmaKey}';\n    INSERT INTO DeviceProfile (device_id, device_name, mac_address_1, mac_address_2, is_broker, authentication_status, registered_at) \n    VALUES ('${deviceId}', '${deviceName}', '${macAddress1}', '${macAddress2}', ${isBroker}, NULL, ${registrationTime});\n    `;\n} else {\n    // Case 2: Device IDs do not match → INSERT OR REPLACE\n    sqlQuery = `\n    PRAGMA key = '${pragmaKey}';\n    INSERT OR REPLACE INTO DeviceProfile (device_id, device_name, mac_address_1, mac_address_2, is_broker, authentication_status, registered_at) \n    VALUES ('${deviceId}', '${deviceName}', '${macAddress1}', '${macAddress2}', ${isBroker}, NULL, ${registrationTime});\n    `;\n}\n\n// --- Step 5: Set payload for exec ---\nmsg.payload = `sqlcipher ${dbPath} <<< \"${sqlQuery.trim()}\"`;\n\nreturn msg;\n",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 1010,
+        "y": 420,
+        "wires": [
+            [
+                "a2ec368fee83714f"
+            ]
+        ]
+    },
+    {
+        "id": "8324b82df703be6f",
+        "type": "exec",
+        "z": "bb7e0f360c21e427",
+        "command": "",
+        "addpay": "payload",
+        "append": "",
+        "useSpawn": "false",
+        "timer": "",
+        "winHide": false,
+        "oldrc": false,
+        "name": "Sync Device Profle Table",
+        "x": 1530,
+        "y": 400,
+        "wires": [
+            [],
+            [],
+            []
+        ]
+    },
+    {
+        "id": "a2ec368fee83714f",
+        "type": "delay",
+        "z": "bb7e0f360c21e427",
+        "name": "",
+        "pauseType": "delay",
+        "timeout": "5",
+        "timeoutUnits": "seconds",
+        "rate": "1",
+        "nbRateUnits": "1",
+        "rateUnits": "second",
+        "randomFirst": "1",
+        "randomLast": "5",
+        "randomUnits": "seconds",
+        "drop": false,
+        "allowrate": false,
+        "outputs": 1,
+        "x": 1300,
+        "y": 420,
+        "wires": [
+            [
+                "8324b82df703be6f"
+            ]
+        ]
+    },
+    {
+        "id": "789a8244b544a0d3",
+        "type": "function",
+        "z": "bb7e0f360c21e427",
+        "name": "Prepare query for Keys Table to sync",
+        "func": "const fs = global.get(\"fs\");\n\nconst payload = msg.payload;\nconst deviceId = payload.device_id;\nconst publicKey = payload.public_key;\nconst devicename = payload.devicename;\n\nconst dbPath = \"/etc/mosquitto/certs/update_database.db\";\nconst pragmaKey = env.get(\"DB_PASSWORD\");\n\nconst publicKeyEscaped = publicKey.replace(/'/g, \"''\");\n\n// --- Extra: if this is Sunny, write the key to file ---\nif (devicename && devicename.toLowerCase() === \"sunny\") {\n    try {\n        const sunnyPath = \"/etc/mosquitto/certs/sunny-public-key.pem\";\n        fs.writeFileSync(sunnyPath, publicKey, \"utf8\");\n        node.warn(`✅ Sunny public key written to ${sunnyPath}`);\n    } catch (err) {\n        node.error(`❌ Failed to write Sunny public key: ${err.message}`);\n    }\n}\n\n// --- UPSERT query ---\nconst sqlUpsert = `\nPRAGMA key = '${pragmaKey}';\nUPDATE Keys\nSET public_key = '${publicKeyEscaped}'\nWHERE device_id = '${deviceId}';\n\nINSERT INTO Keys (device_id, public_key)\nSELECT '${deviceId}', '${publicKeyEscaped}'\nWHERE NOT EXISTS (\n    SELECT 1 FROM Keys WHERE device_id = '${deviceId}'\n);\n`;\n\nmsg.payload = `sqlcipher ${dbPath} <<< \"${sqlUpsert.trim()}\"`;\n\nreturn msg;\n",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 990,
+        "y": 580,
+        "wires": [
+            [
+                "0605f1e478519235"
+            ]
+        ]
+    },
+    {
+        "id": "0605f1e478519235",
+        "type": "delay",
+        "z": "bb7e0f360c21e427",
+        "name": "",
+        "pauseType": "delay",
+        "timeout": "10",
+        "timeoutUnits": "seconds",
+        "rate": "1",
+        "nbRateUnits": "1",
+        "rateUnits": "second",
+        "randomFirst": "1",
+        "randomLast": "5",
+        "randomUnits": "seconds",
+        "drop": false,
+        "allowrate": false,
+        "outputs": 1,
+        "x": 1240,
+        "y": 580,
+        "wires": [
+            [
+                "55c9ae7f9db214b6"
+            ]
+        ]
+    },
+    {
+        "id": "55c9ae7f9db214b6",
+        "type": "exec",
+        "z": "bb7e0f360c21e427",
+        "command": "",
+        "addpay": "payload",
+        "append": "",
+        "useSpawn": "false",
+        "timer": "",
+        "winHide": false,
+        "oldrc": false,
+        "name": "Sync Keys Table",
+        "x": 1440,
+        "y": 580,
+        "wires": [
+            [],
+            [],
+            []
+        ]
+    },
+    {
+        "id": "302531072cad5ab5",
+        "type": "function",
+        "z": "bb7e0f360c21e427",
+        "name": "Prepare query for authentication_satus to sync",
+        "func": "const payload = msg.payload;\nconst deviceId = payload.device_id;\nconst authentication_status = payload.authentication_status;\n\nconst dbPath = \"/etc/mosquitto/certs/update_database.db\";\nconst pragmaKey = env.get(\"DB_PASSWORD\");\n\n\n\n// UPSERT workaround:\nconst sqlUpsert = `\nPRAGMA key = '${pragmaKey}';\nUPDATE DeviceProfile\nSET authentication_status = '${authentication_status}' \nWHERE device_id = '${deviceId}';\n`;\nmsg.payload = `sqlcipher ${dbPath} <<< \"${sqlUpsert.trim()}\"`;\n\nreturn msg;\n",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 1120,
+        "y": 700,
+        "wires": [
+            [
+                "44c64318f61a45cb"
+            ]
+        ]
+    },
+    {
+        "id": "44c64318f61a45cb",
+        "type": "exec",
+        "z": "bb7e0f360c21e427",
+        "command": "",
+        "addpay": "payload",
+        "append": "",
+        "useSpawn": "false",
+        "timer": "",
+        "winHide": false,
+        "oldrc": false,
+        "name": "Sync Authentication Status Table",
+        "x": 1520,
+        "y": 700,
+        "wires": [
+            [],
+            [],
+            []
+        ]
+    },
+    {
+        "id": "8976c9f247fedf9f",
+        "type": "mqtt in",
+        "z": "bb7e0f360c21e427",
+        "name": "Sync Device Profile Table",
+        "topic": "sync/data/device_profile",
+        "qos": "0",
+        "datatype": "auto-detect",
+        "broker": "23d7aa02f5d504e9",
+        "nl": false,
+        "rap": true,
+        "rh": 0,
+        "inputs": 0,
+        "x": 690,
+        "y": 420,
+        "wires": [
+            [
+                "4b78b333fabfa507"
+            ]
+        ]
+    },
+    {
+        "id": "bd926a5633554844",
+        "type": "mqtt in",
+        "z": "bb7e0f360c21e427",
+        "name": "Sync Keys Table",
+        "topic": "sync/data/keys_",
+        "qos": "0",
+        "datatype": "auto-detect",
+        "broker": "23d7aa02f5d504e9",
+        "nl": false,
+        "rap": true,
+        "rh": 0,
+        "inputs": 0,
+        "x": 700,
+        "y": 580,
+        "wires": [
+            [
+                "789a8244b544a0d3"
+            ]
+        ]
+    },
+    {
+        "id": "d55b476dad359f89",
+        "type": "mqtt in",
+        "z": "bb7e0f360c21e427",
+        "name": "Sync Authentication Status",
+        "topic": "sync/database/deviceprofile/auth",
+        "qos": "0",
+        "datatype": "auto-detect",
+        "broker": "9cddc1bd885980b7",
+        "nl": false,
+        "rap": true,
+        "rh": 0,
+        "inputs": 0,
+        "x": 710,
+        "y": 700,
+        "wires": [
+            [
+                "302531072cad5ab5",
+                "8a59af50cf0bfdc7"
+            ]
+        ]
+    },
+    {
+        "id": "6496c268056f2635",
+        "type": "comment",
+        "z": "bb7e0f360c21e427",
+        "name": "Sync Device Profile Table Data of other Devices",
+        "info": "",
+        "x": 780,
+        "y": 380,
+        "wires": []
+    },
+    {
+        "id": "0cf685c15468ccb9",
+        "type": "comment",
+        "z": "bb7e0f360c21e427",
+        "name": "Sync Keys Table Data of other Devices",
+        "info": "",
+        "x": 770,
+        "y": 540,
+        "wires": []
+    },
+    {
+        "id": "dc4175f00129d2ba",
+        "type": "comment",
+        "z": "bb7e0f360c21e427",
+        "name": "Sync Authentication Sataus of other Devices",
+        "info": "",
+        "x": 770,
+        "y": 660,
+        "wires": []
+    },
+    {
+        "id": "3fff6fa77f5f4b50",
+        "type": "comment",
+        "z": "bb7e0f360c21e427",
+        "name": "MQTT Client (Alice)",
+        "info": "",
+        "x": 730,
+        "y": 340,
+        "wires": []
+    },
+    {
+        "id": "8a59af50cf0bfdc7",
+        "type": "debug",
+        "z": "bb7e0f360c21e427",
+        "name": "debug 2",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "false",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 920,
+        "y": 760,
+        "wires": []
+    },
+    {
+        "id": "23d7aa02f5d504e9",
+        "type": "mqtt-broker",
+        "name": "",
+        "broker": "192.168.153.1",
+        "port": 1883,
+        "clientid": "",
+        "autoConnect": true,
+        "usetls": false,
+        "protocolVersion": "4",
+        "keepalive": 60,
+        "cleansession": true,
+        "autoUnsubscribe": true,
+        "birthTopic": "",
+        "birthQos": "0",
+        "birthRetain": "false",
+        "birthPayload": "",
+        "birthMsg": {},
+        "closeTopic": "",
+        "closeQos": "0",
+        "closeRetain": "false",
+        "closePayload": "",
+        "closeMsg": {},
+        "willTopic": "",
+        "willQos": "0",
+        "willRetain": "false",
+        "willPayload": "",
+        "willMsg": {},
+        "userProps": "",
+        "sessionExpiry": ""
+    },
+    {
+        "id": "9cddc1bd885980b7",
+        "type": "mqtt-broker",
+        "name": "",
+        "broker": "192.168.153.1",
+        "port": "8883",
+        "tls": "4e3e159d8e243951",
+        "clientid": "",
+        "autoConnect": true,
+        "usetls": true,
+        "protocolVersion": 4,
+        "keepalive": 60,
+        "cleansession": true,
+        "autoUnsubscribe": true,
+        "birthTopic": "",
+        "birthQos": "0",
+        "birthRetain": "false",
+        "birthPayload": "",
+        "birthMsg": {},
+        "closeTopic": "",
+        "closeQos": "0",
+        "closeRetain": "false",
+        "closePayload": "",
+        "closeMsg": {},
+        "willTopic": "",
+        "willQos": "0",
+        "willRetain": "false",
+        "willPayload": "",
+        "willMsg": {},
+        "userProps": "",
+        "sessionExpiry": ""
+    },
+    {
+        "id": "4e3e159d8e243951",
+        "type": "tls-config",
+        "name": "",
+        "cert": "/etc/mosquitto/certs/alice.pem",
+        "key": "/etc/mosquitto/certs/alice-key.pem",
+        "ca": "/etc/mosquitto/certs/MQTTS.pem",
+        "certname": "",
+        "keyname": "",
+        "caname": "",
+        "servername": "cookie",
+        "verifyservercert": true,
+        "alpnprotocol": ""
+    }
+]

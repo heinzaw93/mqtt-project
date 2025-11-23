@@ -1,0 +1,12 @@
+[Unit]
+Description=Dynamic Route Updater for Jonny & Cake
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/update_routes.sh
+Type=oneshot
+RemainAfterExit=true
+
+[Install]
+WantedBy=multi-user.target

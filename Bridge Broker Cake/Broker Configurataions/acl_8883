@@ -1,0 +1,107 @@
+# CN must be exactly the device/broker name used in topics.
+# (These usernames come from TLS cert CNs.)
+
+# =========================
+# Mutual Authentication and Database Sync ACL
+# =========================
+
+
+pattern read  authentication/respond/%u
+pattern write authentication/respond_ack/%u
+pattern write authentication/request/%u
+user sunny
+topic read  sync/database/deviceprofile/auth
+topic write sync/database/deviceprofile/auth
+user cake
+topic read  authentication/request/+
+topic write authentication/respond/+
+topic read  authentication/respond_ack/+
+topic read  sync/database/deviceprofile/auth
+topic write sync/database/deviceprofile/auth
+user alice
+topic read  sync/database/deviceprofile/auth
+topic write sync/database/deviceprofile/auth
+user bob
+topic read  sync/database/deviceprofile/auth
+topic write sync/database/deviceprofile/auth
+
+# =========================
+# Rotation and Revocation ACL
+# =========================
+
+
+pattern read  renew/JWT/%u
+pattern write renew/jwt/%u
+pattern read renew/ECC/%u
+pattern read revoke/MQTTS/%u
+pattern read respond/jwt/%u
+user sunny
+topic write renew/JWT/+
+topic read  renew/jwt/+
+topic write renew/ECC/+
+topic write renew/JWT/+
+topic write revoke/MQTTS/+
+topic write respond/jwt/+
+user cookie
+topic read renew/JWT/+
+topic read renew/jwt/+
+topic write renew/jwt/+
+topic write renew/ECC/+
+topic read renew/ECC/+
+topic write renew/JWT/+
+topic read renew/JWT/+
+topic write respond/jwt/+
+topic read respond/jwt/+
+topic write revoke/MQTTS/+
+topic read revoke/MQTTS/+
+user cake
+topic read renew/JWT/+
+topic read renew/jwt/+
+topic write renew/jwt/+
+topic write renew/ECC/+
+topic read renew/ECC/+
+topic write renew/JWT/+
+topic read renew/JWT/+
+topic write respond/jwt/+
+topic read respond/jwt/+
+topic write revoke/MQTTS/+
+topic read revoke/MQTTS/+
+# =========================
+# Topic Registration and data transfer ACL
+# =========================
+
+
+pattern read  topic/respond/%u
+pattern write topic/register/%u
+pattern write topic/key_req/%u
+pattern read topic/key_resp/%u
+pattern write data/%u
+pattern read data/%u
+user sunny
+topic write topic/respond/+
+topic read  topic/register/+
+topic write topic/key_resp/+
+topic read topic/key_req/+
+topic read data/+
+topic write data/+
+user cookie
+topic write topic/respond/+
+topic read  topic/register/+
+topic write topic/key_resp/+
+topic read topic/key_req/+
+topic read data/+
+topic write data/+
+user cake
+topic write topic/respond/+
+topic read  topic/register/+
+topic write topic/key_resp/+
+topic read topic/key_req/+
+topic read data/+
+topic write data/+
+user alice
+topic write data/+
+topic read data/+  
+user bob  
+topic write data/+
+topic read data/+
+

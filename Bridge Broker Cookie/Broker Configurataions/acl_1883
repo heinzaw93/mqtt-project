@@ -1,0 +1,31 @@
+# ===== Devices (scoped by username) =====
+# Device publishes its OWN public key and registration request:
+pattern write keys/public key/%u/#
+pattern write registration/request/%u/#
+
+# Device reads ONLY its OWN responses from Sunny:
+pattern read  keys/registration/%u/#
+pattern read  registration/respond/%u/#
+
+#==== Per Device =====
+# The plain bridge client on Cookie will subscribe the synced tables from Cookie itself.
+user cookie_plain
+
+#Database Sync
+topic read sync/data/#
+topic write sync/data/keys_
+#Baseline Bridge
+topic read home/#
+topic write home/#
+ 
+user bob
+#Database Sync
+topic read sync/data/#
+topic write sync/data/keys_
+#Database Sync
+user alice
+topic read sync/data/#
+topic write sync/data/keys_
+topic write home/#
+
+

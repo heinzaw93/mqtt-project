@@ -1,0 +1,132 @@
+[
+    {
+        "id": "066c872c87b13c66",
+        "type": "tab",
+        "label": "MITM",
+        "disabled": false,
+        "info": "",
+        "env": []
+    },
+    {
+        "id": "2ee8fcbb0525552d",
+        "type": "mqtt in",
+        "z": "066c872c87b13c66",
+        "name": "",
+        "topic": "data/+",
+        "qos": "2",
+        "datatype": "auto-detect",
+        "broker": "72399054283f9843",
+        "nl": false,
+        "rap": true,
+        "rh": 0,
+        "inputs": 0,
+        "x": 370,
+        "y": 100,
+        "wires": [
+            [
+                "46b9aa60bc55a129",
+                "df77d3f8c5bf093d"
+            ]
+        ]
+    },
+    {
+        "id": "46b9aa60bc55a129",
+        "type": "function",
+        "z": "066c872c87b13c66",
+        "name": "Shit signature",
+        "func": "// 1) Preserve incoming topic for dynamic republish\nconst incomingTopic = msg.topic;\n\n// 2) Extract and parse payload safely\nlet p = msg.payload;\nif (typeof p === \"string\") {\n    try { p = JSON.parse(p); }\n    catch (e) {\n        node.warn(\"Invalid JSON payload, skipping\");\n        return null;\n    }\n}\nif (!p) {\n    node.warn(\"Empty payload, skipping\");\n    return null;\n}\n\n// ---- IMPORTANT: avoid endless loop & only attack MITM run ----\n\n// a) Do NOT re-attack messages we already modified\nif (p.mode === \"cookie_sig_shift_3\") {\n    // This is Cookie's own tampered message → ignore it\n    return null;\n}\n\n// b) Only attack messages for the MITM experiment run\n//    (Alice's inject node sets run_tag = \"MITM\" for this test)\nconst km = p.kms_meta || {};\nconst runTag = String(p.run_tag || km.run_tag || \"\");\nif (runTag !== \"MITM\") {\n    // For normal secure runs, do nothing\n    return null;\n}\n\n// 3) Extract signature and modify it\nconst sigB64 = String(p.signature_b64 || \"\").trim();\nif (!sigB64) {\n    node.warn(\"No signature_b64 found, skipping\");\n    return null;\n}\n\nconst sigBuf = Buffer.from(sigB64, \"base64\");\n\n// Shift every byte by +3 (MITM tampering)\nfor (let i = 0; i < sigBuf.length; i++) {\n    sigBuf[i] = (sigBuf[i] + 3) & 0xff;\n}\n\np.signature_b64 = sigBuf.toString(\"base64\");\n\n// 4) Mark this message as tampered (so Bob can see mode if needed)\np.mode = \"cookie_sig_shift_3\";\n\n// 5) Output back to same topic\nmsg.payload = p;\nmsg.topic   = incomingTopic;\n\nreturn msg;\n",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 620,
+        "y": 100,
+        "wires": [
+            [
+                "2035c91a5be7ace4"
+            ]
+        ]
+    },
+    {
+        "id": "2035c91a5be7ace4",
+        "type": "mqtt out",
+        "z": "066c872c87b13c66",
+        "name": "",
+        "topic": "",
+        "qos": "",
+        "retain": "",
+        "respTopic": "",
+        "contentType": "",
+        "userProps": "",
+        "correl": "",
+        "expiry": "",
+        "broker": "72399054283f9843",
+        "x": 790,
+        "y": 100,
+        "wires": []
+    },
+    {
+        "id": "df77d3f8c5bf093d",
+        "type": "debug",
+        "z": "066c872c87b13c66",
+        "name": "debug 7",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "false",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 540,
+        "y": 200,
+        "wires": []
+    },
+    {
+        "id": "72399054283f9843",
+        "type": "mqtt-broker",
+        "name": "",
+        "broker": "192.168.151.1",
+        "port": "8883",
+        "tls": "b6e1278c5d544171",
+        "clientid": "",
+        "autoConnect": true,
+        "usetls": true,
+        "protocolVersion": 4,
+        "keepalive": 60,
+        "cleansession": true,
+        "autoUnsubscribe": true,
+        "birthTopic": "",
+        "birthQos": "0",
+        "birthRetain": "false",
+        "birthPayload": "",
+        "birthMsg": {},
+        "closeTopic": "",
+        "closeQos": "0",
+        "closeRetain": "false",
+        "closePayload": "",
+        "closeMsg": {},
+        "willTopic": "",
+        "willQos": "0",
+        "willRetain": "false",
+        "willPayload": "",
+        "willMsg": {},
+        "userProps": "",
+        "sessionExpiry": ""
+    },
+    {
+        "id": "b6e1278c5d544171",
+        "type": "tls-config",
+        "name": "",
+        "cert": "/etc/mosquitto/certs/cookie.pem",
+        "key": "/etc/mosquitto/certs/cookie-key.pem",
+        "ca": "/etc/mosquitto/certs/MQTTS.pem",
+        "certname": "",
+        "keyname": "",
+        "caname": "",
+        "servername": "sunny",
+        "verifyservercert": true,
+        "alpnprotocol": ""
+    }
+]

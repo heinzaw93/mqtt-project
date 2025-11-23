@@ -1,0 +1,58 @@
+
+# =====All  Devices (scoped by username) =====
+# Device publishes its OWN public key and registration request:
+pattern write keys/public key/%u/#
+pattern write registration/request/%u/#
+pattern write devices/%u/heartbeat
+# Device reads ONLY its OWN responses from Sunny:
+pattern read  keys/registration/%u/#
+pattern read  registration/respond/%u/#
+
+# Per Device 
+user sunny
+# Device Registraion Handler Rules:
+topic read keys/public key/#
+topic read registration/request/#
+topic read devices/+/heartbeat
+topic write keys/registration/#
+topic write registration/respond/#
+# Database Sync Flow Rules:
+topic write sync/data/device_profile
+topic write sync/data/keys_
+topic read sync/data/device_profile
+topic read sync/data/keys_
+
+user cookie_plain
+# Database Sync Flow Rules:
+topic write sync/data/keys_
+topic read sync/data/device_profile
+topic read sync/data/keys_
+# Baseline Bridge Rules:
+topic write home/#
+topic read home/#
+
+user cake_plain
+# Database Sync Flow Rules:
+topic write sync/data/keys_
+topic read sync/data/device_profile
+topic read sync/data/keys_
+# Baseline Bridge Rules:
+topic write home/#
+topic read home/#
+
+user bob
+# Baseline Single Rules:
+topic read alice/#
+# Database Sync Flow Rules:
+topic write sync/data/keys_
+topic read sync/data/device_profile
+topic read sync/data/keys_
+
+user alice
+# Baseline Single Rules:
+topic write alice/#
+# Database Sync Flow Rules:
+topic write sync/data/keys_
+topic read sync/data/device_profile
+topic read sync/data/keys_
+

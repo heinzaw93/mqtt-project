@@ -1,0 +1,16 @@
+[Unit]
+Description=Renew Mosquitto TLS cert via step-ca and reload broker (Sunny)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+EnvironmentFile=-/etc/default/mosq-renew-env
+ExecStart=/usr/bin/step ca renew /etc/mosquitto/certs/alice.pem /etc/mosquitto/certs/alice-key.pem --daemon --root /etc/mosquitto/certs/MQTTS.pem --exec /usr/local/bin/reload-mosquitto.sh
+Restart=always
+RestartSec=10s
+
+[Install]
+WantedBy=multi-user.target
+

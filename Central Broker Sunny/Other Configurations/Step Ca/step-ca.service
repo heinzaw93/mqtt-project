@@ -1,0 +1,25 @@
+[Unit]
+Description=Smallstep Certificate Authority (step-ca)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+User=step
+Group=step
+Environment=STEPPATH=/home/step/.step
+WorkingDirectory=/home/step
+ExecStart=/usr/bin/step-ca --password-file /etc/step-ca/secrets/intermediate_password /home/step/.step/config/ca.json
+Restart=on-failure
+RestartSec=5s
+LimitNOFILE=65536
+
+# Hardening (safe subset)
+NoNewPrivileges=true
+PrivateTmp=true
+# ProtectHome & ProtectSystem removed so the CA can write its DB under /home/step/.step
+#ProtectHome=true
+#ProtectSystem=full
+AmbientCapabilities=
+
+[Install]
+WantedBy=multi-user.target

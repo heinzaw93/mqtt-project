@@ -1,0 +1,903 @@
+[
+    {
+        "id": "d715720c626fffcf",
+        "type": "tab",
+        "label": "BaseLine Data Transfer",
+        "disabled": false,
+        "info": "",
+        "env": []
+    },
+    {
+        "id": "17b551e79dc10191",
+        "type": "comment",
+        "z": "d715720c626fffcf",
+        "name": "without birdge QOS0",
+        "info": "",
+        "x": 150,
+        "y": 220,
+        "wires": []
+    },
+    {
+        "id": "f23aea8c88a466a5",
+        "type": "comment",
+        "z": "d715720c626fffcf",
+        "name": "with birdge QOS0",
+        "info": "",
+        "x": 1590,
+        "y": 240,
+        "wires": []
+    },
+    {
+        "id": "22154ecd0b9cbe72",
+        "type": "mqtt in",
+        "z": "d715720c626fffcf",
+        "name": "Data recieved via Cake",
+        "topic": "home/alice/qos0",
+        "qos": "0",
+        "datatype": "auto-detect",
+        "broker": "56aa58dc871c111d",
+        "nl": false,
+        "rap": true,
+        "rh": 0,
+        "inputs": 0,
+        "x": 1580,
+        "y": 300,
+        "wires": [
+            [
+                "c191e178e1d57b54"
+            ]
+        ]
+    },
+    {
+        "id": "5d03bcfc09a39cc1",
+        "type": "comment",
+        "z": "d715720c626fffcf",
+        "name": "without birdge QOS1",
+        "info": "",
+        "x": 170,
+        "y": 620,
+        "wires": []
+    },
+    {
+        "id": "a823cc495999cc07",
+        "type": "comment",
+        "z": "d715720c626fffcf",
+        "name": "without birdge QOS2",
+        "info": "",
+        "x": 170,
+        "y": 940,
+        "wires": []
+    },
+    {
+        "id": "58925b2bd4c39dc0",
+        "type": "comment",
+        "z": "d715720c626fffcf",
+        "name": "MQTT Client (BOB)",
+        "info": "",
+        "x": 170,
+        "y": 160,
+        "wires": []
+    },
+    {
+        "id": "6cf9dd3e6e1933c2",
+        "type": "file",
+        "z": "d715720c626fffcf",
+        "name": "CSV: summary_latency.csv (via msg.filename)",
+        "filename": "filename",
+        "filenameType": "msg",
+        "appendNewline": true,
+        "createDir": true,
+        "overwriteFile": "false",
+        "encoding": "none",
+        "x": 1110,
+        "y": 680,
+        "wires": [
+            []
+        ]
+    },
+    {
+        "id": "1678dab418e86873",
+        "type": "function",
+        "z": "d715720c626fffcf",
+        "name": "Parse + Latency → bob_perf & Summary (+2 monitor cmds, 4 out)",
+        "func": "// Output 1: per-message CSV (bob_perf.csv)\n// Output 2: per-run summary CSV (summary_latency.csv)\n// Output 3: start monitor script for mosquitto\n// Output 4: start monitor script for node-red\n\nfunction ensureObj(payload) {\n  if (payload && typeof payload === 'object') return payload;\n  try { return JSON.parse(payload); } catch { return {}; }\n}\n\nfunction fmtTime(ms){\n  if(!Number.isFinite(ms)) return \"\";\n  const d = new Date(ms);\n  const p = n => String(n).padStart(2,\"0\");\n  const ms3 = String(d.getMilliseconds()).padStart(3,\"0\");\n  return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} `\n       + `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}.${ms3}`;\n}\n\nconst csv = arr => arr.map(v => (v===undefined?\"\":v)).join(\",\");\n\nconst fs = global.get('fs');\n\n// === 0) Parse inbound payload & basic meta ===\nconst o = ensureObj(msg.payload);\nconst topicParts = (msg.topic || \"\").split(\"/\");\nmsg.device_name = topicParts[0] || \"unknown\";\nconst fullTopic = msg.topic || \"\";\n\nconst runKey   = String(o.run_id || o.run_tag || \"default\");\nconst storeKey = `lat_store_${runKey}`;\nconst monKey   = `lat_mon_started_${runKey}`;\nconst cntKey   = `lat_msg_count_${runKey}`;\nlet arr = flow.get(storeKey) || [];\n\n// header flags (versioned) – bump to v4 because header layout changed\nconst perfHeaderKey = \"perf_header_written_v4\";\nconst sumHeaderKey  = \"summary_header_written_v4\";\n\n// Monitoring script base path (Termux / Bob)\nconst runTag  = String(o.run_tag || \"run\");\nconst qosArg  = String(o.qos ?? \"\");\nconst mqttArg = String(o.mqtt_version ?? \"\");\n\n// Derive duration (seconds) for monitors\nlet durationSec = Number(o.duration || 0);\nconst totalMsgs = Number(o.total || 0);\nconst rateMps   = Number(o.rate_mps || 0);\n\nif (!Number.isFinite(durationSec) || durationSec <= 0) {\n  if (Number.isFinite(totalMsgs) && totalMsgs > 0 && Number.isFinite(rateMps) && rateMps > 0) {\n    durationSec = Math.max(10, Math.ceil(totalMsgs / rateMps));\n  } else {\n    durationSec = 120; // fallback\n  }\n}\n\nconst scriptPath = `/data/data/com.termux/files/home/.node-red/perf_results/monitor_sys_stats.sh`;\nconst cmd1 = `${scriptPath} ${runTag} mosquitto ${qosArg} ${mqttArg} ${durationSec}`;\nconst cmd2 = `${scriptPath} ${runTag} node-red ${qosArg} ${mqttArg} ${durationSec}`;\n\n// files\nconst perfPath = `/data/data/com.termux/files/home/.node-red/perf_results/bob_perf.csv`;\nconst sumPath  = `/data/data/com.termux/files/home/.node-red/perf_results/summary_latency.csv`;\n\n// === 1) DATA messages ===\nif (o.type === \"data\") {\n  const t_pub  = Number(o.t_pub);\n  const t_recv = Date.now();\n  const latencyMs  = Number.isFinite(t_pub) ? (t_recv - t_pub) : NaN;\n  const latencySec = Number.isFinite(latencyMs) ? (latencyMs / 1000).toFixed(3) : \"\";\n\n  const temp = o.data;\n  node.warn(`${msg.device_name} home temperature is ${temp}`);\n\n  if (Number.isFinite(latencyMs)) {\n    arr.push(latencyMs);\n    flow.set(storeKey, arr);\n  }\n\n  // payload_bytes: full JSON payload size (data + meta)\n  let rawPayload;\n  if (typeof msg.payload === \"string\") {\n    rawPayload = msg.payload;\n  } else {\n    try {\n      rawPayload = JSON.stringify(msg.payload);\n    } catch (e) {\n      rawPayload = \"\";\n    }\n  }\n  const payloadBytes = Buffer.byteLength(rawPayload, \"utf8\");\n\n  // Common perf header (aligned with secure)\n  const perfHeader = csv([\n    \"ts_human\",\"mode\",\"path_class\",\"run_tag\",\"mqtt_version\",\"qos\",\"rate_mps\",\n    \"run_id\",\"topic\",\"payload_bytes\",\"t_pub_human\",\"t_recv_human\",\n    \"latency_ms\",\"latency_s\",\"status\"\n  ]);\n\n  const perfRow = csv([\n    fmtTime(Date.now()),\n    o.mode,\n    o.path_class,\n    o.run_tag || \"\",\n    o.mqtt_version,\n    o.qos,\n    o.rate_mps,\n    o.run_id || \"\",\n    fullTopic,\n    payloadBytes,\n    fmtTime(t_pub),\n    fmtTime(t_recv),\n    Number.isFinite(latencyMs) ? latencyMs : \"\",\n    latencySec,\n    \"OK\"\n  ]);\n\n  const out1Msgs = [];\n  const perfHdrWritten = !!flow.get(perfHeaderKey);\n  const perfFileMissing = (fs && fs.existsSync) ? !fs.existsSync(perfPath) : !perfHdrWritten;\n  if (!perfHdrWritten || perfFileMissing) {\n    out1Msgs.push({ payload: perfHeader, filename: perfPath });\n    flow.set(perfHeaderKey, true);\n  }\n  out1Msgs.push({ payload: perfRow, filename: perfPath });\n\n  let out3 = null, out4 = null;\n  if (!flow.get(monKey)) {\n    flow.set(cntKey, 0);\n    out3 = { payload: cmd1 };\n    out4 = { payload: cmd2 };\n    flow.set(monKey, true);\n  }\n\n  let cnt = Number(flow.get(cntKey) || 0) + 1;\n  flow.set(cntKey, cnt);\n  node.status({ fill: 'blue', shape: 'dot', text: `${o.rate_mps ?? '?'} msg/s • ${cnt} msgs` });\n\n  return [out1Msgs, null, out3, out4];\n}\n\n// === 2) DONE message ===\nif (o.type === \"done\" && o.done === true) {\n  const cnt = Number(flow.get(cntKey) || 0);\n\n  // Common summary header (aligned with secure)\n  const sumHeader = csv([\n    \"ts_human\",\"mode\",\"path_class\",\"run_tag\",\"mqtt_version\",\"qos\",\"rate_mps\",\n    \"run_id\",\"count\",\"expected_count\",\"estimated_drop_count\",\"estimated_drop_pct\",\n    \"median_ms\",\"p95_ms\",\"p99_ms\",\"median_s\",\"p95_s\",\"p99_s\"\n  ]);\n\n  if (!arr.length) {\n    const hdrMsgs = [];\n    const sumHdrWritten = !!flow.get(sumHeaderKey);\n    const sumFileMissing = (fs && fs.existsSync) ? !fs.existsSync(sumPath) : !sumHdrWritten;\n    if (!sumHdrWritten || sumFileMissing) {\n      hdrMsgs.push({ payload: sumHeader, filename: sumPath });\n      flow.set(sumHeaderKey, true);\n    }\n    node.status({ fill: 'green', shape: 'dot', text: `done ${cnt} msgs @ ${o.rate_mps ?? '?'} msg/s` });\n    flow.set(monKey, false);\n    flow.set(cntKey, 0);\n    return [null, hdrMsgs, null, null];\n  }\n\n  arr.sort((a,b)=>a-b);\n  const q = p => arr[Math.min(arr.length-1, Math.floor(p*(arr.length-1)))];\n  const median = q(0.5);\n  const p95    = q(0.95);\n  const p99    = q(0.99);\n\n  const observedCount = arr.length;\n\n  let expectedCount;\n  if (Number.isFinite(totalMsgs) && totalMsgs > 0) {\n    expectedCount = Math.round(totalMsgs);\n  } else if (Number.isFinite(rateMps) && rateMps > 0 && Number.isFinite(durationSec) && durationSec > 0) {\n    expectedCount = Math.round(rateMps * durationSec);\n  } else {\n    expectedCount = observedCount;\n  }\n\n  if (expectedCount < observedCount) expectedCount = observedCount;\n\n  let dropCount = expectedCount - observedCount;\n  if (dropCount < 0) dropCount = 0;\n\n  const dropPct = expectedCount > 0 ? (dropCount / expectedCount) * 100 : 0;\n\n  const sumRow = csv([\n    fmtTime(Date.now()),\n    o.mode,\n    o.path_class,\n    o.run_tag || \"\",\n    o.mqtt_version,\n    o.qos,\n    o.rate_mps,\n    o.run_id || \"default\",\n    observedCount,\n    expectedCount,\n    dropCount,\n    dropPct.toFixed(1),\n    median,\n    p95,\n    p99,\n    (median/1000).toFixed(3),\n    (p95/1000).toFixed(3),\n    (p99/1000).toFixed(3)\n  ]);\n\n  flow.set(storeKey, []);\n  flow.set(monKey, false);\n  flow.set(cntKey, 0);\n  node.status({ fill: 'green', shape: 'dot', text: `done ${cnt} msgs @ ${o.rate_mps ?? '?'} msg/s` });\n\n  const out2Msgs = [];\n  const sumHdrWritten = !!flow.get(sumHeaderKey);\n  const sumFileMissing = (fs && fs.existsSync) ? !fs.existsSync(sumPath) : !sumHdrWritten;\n  if (!sumHdrWritten || sumFileMissing) {\n    out2Msgs.push({ payload: sumHeader, filename: sumPath });\n    flow.set(sumHeaderKey, true);\n  }\n  out2Msgs.push({ payload: sumRow, filename: sumPath });\n\n  return [null, out2Msgs, null, null];\n}\n\n// Anything else → no-op\nreturn [null, null, null, null];\n",
+        "outputs": 4,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 600,
+        "y": 720,
+        "wires": [
+            [
+                "80d25fe4673750cb"
+            ],
+            [
+                "6cf9dd3e6e1933c2"
+            ],
+            [
+                "05c842667e406d79"
+            ],
+            [
+                "71bafdec583f1ac8"
+            ]
+        ]
+    },
+    {
+        "id": "05c842667e406d79",
+        "type": "exec",
+        "z": "d715720c626fffcf",
+        "command": "",
+        "addpay": true,
+        "append": "",
+        "useSpawn": "false",
+        "timer": "",
+        "oldrc": false,
+        "name": "Exec: start monitor (mosquitto)",
+        "x": 1080,
+        "y": 760,
+        "wires": [
+            [],
+            [],
+            []
+        ]
+    },
+    {
+        "id": "71bafdec583f1ac8",
+        "type": "exec",
+        "z": "d715720c626fffcf",
+        "command": "",
+        "addpay": true,
+        "append": "",
+        "useSpawn": "false",
+        "timer": "",
+        "oldrc": false,
+        "name": "Exec: start monitor (node-red)",
+        "x": 1050,
+        "y": 860,
+        "wires": [
+            [],
+            [],
+            []
+        ]
+    },
+    {
+        "id": "dd86975c90d1c6c6",
+        "type": "mqtt in",
+        "z": "d715720c626fffcf",
+        "name": "Data recieved via Sunny",
+        "topic": "alice/temp/qos1",
+        "qos": "1",
+        "datatype": "auto-detect",
+        "broker": "291c926844812879",
+        "nl": false,
+        "rap": true,
+        "rh": 0,
+        "inputs": 0,
+        "x": 190,
+        "y": 680,
+        "wires": [
+            [
+                "1678dab418e86873"
+            ]
+        ]
+    },
+    {
+        "id": "797adc677e74c090",
+        "type": "file",
+        "z": "d715720c626fffcf",
+        "name": "CSV: summary_latency.csv (via msg.filename)",
+        "filename": "filename",
+        "filenameType": "msg",
+        "appendNewline": true,
+        "createDir": true,
+        "overwriteFile": "false",
+        "encoding": "none",
+        "x": 1020,
+        "y": 1100,
+        "wires": [
+            []
+        ]
+    },
+    {
+        "id": "8e6f3d0bca09eba5",
+        "type": "function",
+        "z": "d715720c626fffcf",
+        "name": "Parse + Latency → bob_perf & Summary (+2 monitor cmds, 4 out)",
+        "func": "// Output 1: per-message CSV (bob_perf.csv)\n// Output 2: per-run summary CSV (summary_latency.csv)\n// Output 3: start monitor script for mosquitto\n// Output 4: start monitor script for node-red\n\nfunction ensureObj(payload) {\n  if (payload && typeof payload === 'object') return payload;\n  try { return JSON.parse(payload); } catch { return {}; }\n}\n\nfunction fmtTime(ms){\n  if(!Number.isFinite(ms)) return \"\";\n  const d = new Date(ms);\n  const p = n => String(n).padStart(2,\"0\");\n  const ms3 = String(d.getMilliseconds()).padStart(3,\"0\");\n  return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} `\n       + `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}.${ms3}`;\n}\n\nconst csv = arr => arr.map(v => (v===undefined?\"\":v)).join(\",\");\n\nconst fs = global.get('fs');\n\n// === 0) Parse inbound payload & basic meta ===\nconst o = ensureObj(msg.payload);\nconst topicParts = (msg.topic || \"\").split(\"/\");\nmsg.device_name = topicParts[0] || \"unknown\";\nconst fullTopic = msg.topic || \"\";\n\nconst runKey   = String(o.run_id || o.run_tag || \"default\");\nconst storeKey = `lat_store_${runKey}`;\nconst monKey   = `lat_mon_started_${runKey}`;\nconst cntKey   = `lat_msg_count_${runKey}`;\nlet arr = flow.get(storeKey) || [];\n\n// header flags (versioned) – bump to v4 because header layout changed\nconst perfHeaderKey = \"perf_header_written_v4\";\nconst sumHeaderKey  = \"summary_header_written_v4\";\n\n// Monitoring script base path (Termux / Bob)\nconst runTag  = String(o.run_tag || \"run\");\nconst qosArg  = String(o.qos ?? \"\");\nconst mqttArg = String(o.mqtt_version ?? \"\");\n\n// Derive duration (seconds) for monitors\nlet durationSec = Number(o.duration || 0);\nconst totalMsgs = Number(o.total || 0);\nconst rateMps   = Number(o.rate_mps || 0);\n\nif (!Number.isFinite(durationSec) || durationSec <= 0) {\n  if (Number.isFinite(totalMsgs) && totalMsgs > 0 && Number.isFinite(rateMps) && rateMps > 0) {\n    durationSec = Math.max(10, Math.ceil(totalMsgs / rateMps));\n  } else {\n    durationSec = 120; // fallback\n  }\n}\n\nconst scriptPath = `/data/data/com.termux/files/home/.node-red/perf_results/monitor_sys_stats.sh`;\nconst cmd1 = `${scriptPath} ${runTag} mosquitto ${qosArg} ${mqttArg} ${durationSec}`;\nconst cmd2 = `${scriptPath} ${runTag} node-red ${qosArg} ${mqttArg} ${durationSec}`;\n\n// files\nconst perfPath = `/data/data/com.termux/files/home/.node-red/perf_results/bob_perf.csv`;\nconst sumPath  = `/data/data/com.termux/files/home/.node-red/perf_results/summary_latency.csv`;\n\n// === 1) DATA messages ===\nif (o.type === \"data\") {\n  const t_pub  = Number(o.t_pub);\n  const t_recv = Date.now();\n  const latencyMs  = Number.isFinite(t_pub) ? (t_recv - t_pub) : NaN;\n  const latencySec = Number.isFinite(latencyMs) ? (latencyMs / 1000).toFixed(3) : \"\";\n\n  const temp = o.data;\n  node.warn(`${msg.device_name} home temperature is ${temp}`);\n\n  if (Number.isFinite(latencyMs)) {\n    arr.push(latencyMs);\n    flow.set(storeKey, arr);\n  }\n\n  // payload_bytes: full JSON payload size (data + meta)\n  let rawPayload;\n  if (typeof msg.payload === \"string\") {\n    rawPayload = msg.payload;\n  } else {\n    try {\n      rawPayload = JSON.stringify(msg.payload);\n    } catch (e) {\n      rawPayload = \"\";\n    }\n  }\n  const payloadBytes = Buffer.byteLength(rawPayload, \"utf8\");\n\n  // Common perf header (aligned with secure)\n  const perfHeader = csv([\n    \"ts_human\",\"mode\",\"path_class\",\"run_tag\",\"mqtt_version\",\"qos\",\"rate_mps\",\n    \"run_id\",\"topic\",\"payload_bytes\",\"t_pub_human\",\"t_recv_human\",\n    \"latency_ms\",\"latency_s\",\"status\"\n  ]);\n\n  const perfRow = csv([\n    fmtTime(Date.now()),\n    o.mode,\n    o.path_class,\n    o.run_tag || \"\",\n    o.mqtt_version,\n    o.qos,\n    o.rate_mps,\n    o.run_id || \"\",\n    fullTopic,\n    payloadBytes,\n    fmtTime(t_pub),\n    fmtTime(t_recv),\n    Number.isFinite(latencyMs) ? latencyMs : \"\",\n    latencySec,\n    \"OK\"\n  ]);\n\n  const out1Msgs = [];\n  const perfHdrWritten = !!flow.get(perfHeaderKey);\n  const perfFileMissing = (fs && fs.existsSync) ? !fs.existsSync(perfPath) : !perfHdrWritten;\n  if (!perfHdrWritten || perfFileMissing) {\n    out1Msgs.push({ payload: perfHeader, filename: perfPath });\n    flow.set(perfHeaderKey, true);\n  }\n  out1Msgs.push({ payload: perfRow, filename: perfPath });\n\n  let out3 = null, out4 = null;\n  if (!flow.get(monKey)) {\n    flow.set(cntKey, 0);\n    out3 = { payload: cmd1 };\n    out4 = { payload: cmd2 };\n    flow.set(monKey, true);\n  }\n\n  let cnt = Number(flow.get(cntKey) || 0) + 1;\n  flow.set(cntKey, cnt);\n  node.status({ fill: 'blue', shape: 'dot', text: `${o.rate_mps ?? '?'} msg/s • ${cnt} msgs` });\n\n  return [out1Msgs, null, out3, out4];\n}\n\n// === 2) DONE message ===\nif (o.type === \"done\" && o.done === true) {\n  const cnt = Number(flow.get(cntKey) || 0);\n\n  // Common summary header (aligned with secure)\n  const sumHeader = csv([\n    \"ts_human\",\"mode\",\"path_class\",\"run_tag\",\"mqtt_version\",\"qos\",\"rate_mps\",\n    \"run_id\",\"count\",\"expected_count\",\"estimated_drop_count\",\"estimated_drop_pct\",\n    \"median_ms\",\"p95_ms\",\"p99_ms\",\"median_s\",\"p95_s\",\"p99_s\"\n  ]);\n\n  if (!arr.length) {\n    const hdrMsgs = [];\n    const sumHdrWritten = !!flow.get(sumHeaderKey);\n    const sumFileMissing = (fs && fs.existsSync) ? !fs.existsSync(sumPath) : !sumHdrWritten;\n    if (!sumHdrWritten || sumFileMissing) {\n      hdrMsgs.push({ payload: sumHeader, filename: sumPath });\n      flow.set(sumHeaderKey, true);\n    }\n    node.status({ fill: 'green', shape: 'dot', text: `done ${cnt} msgs @ ${o.rate_mps ?? '?'} msg/s` });\n    flow.set(monKey, false);\n    flow.set(cntKey, 0);\n    return [null, hdrMsgs, null, null];\n  }\n\n  arr.sort((a,b)=>a-b);\n  const q = p => arr[Math.min(arr.length-1, Math.floor(p*(arr.length-1)))];\n  const median = q(0.5);\n  const p95    = q(0.95);\n  const p99    = q(0.99);\n\n  const observedCount = arr.length;\n\n  let expectedCount;\n  if (Number.isFinite(totalMsgs) && totalMsgs > 0) {\n    expectedCount = Math.round(totalMsgs);\n  } else if (Number.isFinite(rateMps) && rateMps > 0 && Number.isFinite(durationSec) && durationSec > 0) {\n    expectedCount = Math.round(rateMps * durationSec);\n  } else {\n    expectedCount = observedCount;\n  }\n\n  if (expectedCount < observedCount) expectedCount = observedCount;\n\n  let dropCount = expectedCount - observedCount;\n  if (dropCount < 0) dropCount = 0;\n\n  const dropPct = expectedCount > 0 ? (dropCount / expectedCount) * 100 : 0;\n\n  const sumRow = csv([\n    fmtTime(Date.now()),\n    o.mode,\n    o.path_class,\n    o.run_tag || \"\",\n    o.mqtt_version,\n    o.qos,\n    o.rate_mps,\n    o.run_id || \"default\",\n    observedCount,\n    expectedCount,\n    dropCount,\n    dropPct.toFixed(1),\n    median,\n    p95,\n    p99,\n    (median/1000).toFixed(3),\n    (p95/1000).toFixed(3),\n    (p99/1000).toFixed(3)\n  ]);\n\n  flow.set(storeKey, []);\n  flow.set(monKey, false);\n  flow.set(cntKey, 0);\n  node.status({ fill: 'green', shape: 'dot', text: `done ${cnt} msgs @ ${o.rate_mps ?? '?'} msg/s` });\n\n  const out2Msgs = [];\n  const sumHdrWritten = !!flow.get(sumHeaderKey);\n  const sumFileMissing = (fs && fs.existsSync) ? !fs.existsSync(sumPath) : !sumHdrWritten;\n  if (!sumHdrWritten || sumFileMissing) {\n    out2Msgs.push({ payload: sumHeader, filename: sumPath });\n    flow.set(sumHeaderKey, true);\n  }\n  out2Msgs.push({ payload: sumRow, filename: sumPath });\n\n  return [null, out2Msgs, null, null];\n}\n\n// Anything else → no-op\nreturn [null, null, null, null];\n",
+        "outputs": 4,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 510,
+        "y": 1140,
+        "wires": [
+            [
+                "4a12af5574d16674"
+            ],
+            [
+                "797adc677e74c090"
+            ],
+            [
+                "10cb94438061f53a"
+            ],
+            [
+                "93859d4770220bc6"
+            ]
+        ]
+    },
+    {
+        "id": "10cb94438061f53a",
+        "type": "exec",
+        "z": "d715720c626fffcf",
+        "command": "",
+        "addpay": "payload",
+        "append": "",
+        "useSpawn": "false",
+        "timer": "",
+        "winHide": false,
+        "oldrc": false,
+        "name": "Exec: start monitor (mosquitto)",
+        "x": 990,
+        "y": 1180,
+        "wires": [
+            [],
+            [],
+            []
+        ]
+    },
+    {
+        "id": "93859d4770220bc6",
+        "type": "exec",
+        "z": "d715720c626fffcf",
+        "command": "",
+        "addpay": true,
+        "append": "",
+        "useSpawn": "false",
+        "timer": "",
+        "oldrc": false,
+        "name": "Exec: start monitor (node-red)",
+        "x": 990,
+        "y": 1280,
+        "wires": [
+            [],
+            [],
+            []
+        ]
+    },
+    {
+        "id": "d09968a0a81e7c4d",
+        "type": "mqtt in",
+        "z": "d715720c626fffcf",
+        "name": "Data recieved via Sunny",
+        "topic": "alice/temp/qos2",
+        "qos": "2",
+        "datatype": "auto-detect",
+        "broker": "291c926844812879",
+        "nl": false,
+        "rap": true,
+        "rh": 0,
+        "inputs": 0,
+        "x": 190,
+        "y": 1040,
+        "wires": [
+            [
+                "8e6f3d0bca09eba5"
+            ]
+        ]
+    },
+    {
+        "id": "81824fc33d95097a",
+        "type": "file",
+        "z": "d715720c626fffcf",
+        "name": "CSV: summary_latency.csv (via msg.filename)",
+        "filename": "",
+        "appendNewline": true,
+        "createDir": true,
+        "overwriteFile": "false",
+        "encoding": "none",
+        "x": 2640,
+        "y": 320,
+        "wires": [
+            []
+        ]
+    },
+    {
+        "id": "c191e178e1d57b54",
+        "type": "function",
+        "z": "d715720c626fffcf",
+        "name": "Parse + Latency → bob_perf & Summary (+2 monitor cmds, 4 out)",
+        "func": "// Output 1: per-message CSV (bob_perf.csv)\n// Output 2: per-run summary CSV (summary_latency.csv)\n// Output 3: start monitor script for mosquitto\n// Output 4: start monitor script for node-red\n\nfunction ensureObj(payload) {\n  if (payload && typeof payload === 'object') return payload;\n  try { return JSON.parse(payload); } catch { return {}; }\n}\n\nfunction fmtTime(ms){\n  if(!Number.isFinite(ms)) return \"\";\n  const d = new Date(ms);\n  const p = n => String(n).padStart(2,\"0\");\n  const ms3 = String(d.getMilliseconds()).padStart(3,\"0\");\n  return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} `\n       + `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}.${ms3}`;\n}\n\nconst csv = arr => arr.map(v => (v===undefined?\"\":v)).join(\",\");\n\nconst fs = global.get('fs');\n\n// === 0) Parse inbound payload & basic meta ===\nconst o = ensureObj(msg.payload);\nconst topicParts = (msg.topic || \"\").split(\"/\");\nmsg.device_name = topicParts[1] || \"unknown\";\nconst fullTopic = msg.topic || \"\";\n\nconst runKey   = String(o.run_id || o.run_tag || \"default\");\nconst storeKey = `lat_store_${runKey}`;\nconst monKey   = `lat_mon_started_${runKey}`;\nconst cntKey   = `lat_msg_count_${runKey}`;\nlet arr = flow.get(storeKey) || [];\n\n// header flags (versioned) – bump to v4 because header layout changed\nconst perfHeaderKey = \"perf_header_written_v4\";\nconst sumHeaderKey  = \"summary_header_written_v4\";\n\n// Monitoring script base path (Termux / Bob)\nconst runTag  = String(o.run_tag || \"run\");\nconst qosArg  = String(o.qos ?? \"\");\nconst mqttArg = String(o.mqtt_version ?? \"\");\n\n// Derive duration (seconds) for monitors\nlet durationSec = Number(o.duration || 0);\nconst totalMsgs = Number(o.total || 0);\nconst rateMps   = Number(o.rate_mps || 0);\n\nif (!Number.isFinite(durationSec) || durationSec <= 0) {\n  if (Number.isFinite(totalMsgs) && totalMsgs > 0 && Number.isFinite(rateMps) && rateMps > 0) {\n    durationSec = Math.max(10, Math.ceil(totalMsgs / rateMps));\n  } else {\n    durationSec = 120; // fallback\n  }\n}\n\nconst scriptPath = `/data/data/com.termux/files/home/.node-red/perf_results/monitor_sys_stats.sh`;\nconst cmd1 = `${scriptPath} ${runTag} mosquitto ${qosArg} ${mqttArg} ${durationSec}`;\nconst cmd2 = `${scriptPath} ${runTag} node-red ${qosArg} ${mqttArg} ${durationSec}`;\n\n// files\nconst perfPath = `/data/data/com.termux/files/home/.node-red/perf_results/bob_perf.csv`;\nconst sumPath  = `/data/data/com.termux/files/home/.node-red/perf_results/summary_latency.csv`;\n\n// === 1) DATA messages ===\nif (o.type === \"data\") {\n  const t_pub  = Number(o.t_pub);\n  const t_recv = Date.now();\n  const latencyMs  = Number.isFinite(t_pub) ? (t_recv - t_pub) : NaN;\n  const latencySec = Number.isFinite(latencyMs) ? (latencyMs / 1000).toFixed(3) : \"\";\n\n  const temp = o.data;\n  node.warn(`${msg.device_name} home temperature is ${temp}`);\n\n  if (Number.isFinite(latencyMs)) {\n    arr.push(latencyMs);\n    flow.set(storeKey, arr);\n  }\n\n  // payload_bytes: full JSON payload size (data + meta)\n  let rawPayload;\n  if (typeof msg.payload === \"string\") {\n    rawPayload = msg.payload;\n  } else {\n    try {\n      rawPayload = JSON.stringify(msg.payload);\n    } catch (e) {\n      rawPayload = \"\";\n    }\n  }\n  const payloadBytes = Buffer.byteLength(rawPayload, \"utf8\");\n\n  // Common perf header (aligned with secure)\n  const perfHeader = csv([\n    \"ts_human\",\"mode\",\"path_class\",\"run_tag\",\"mqtt_version\",\"qos\",\"rate_mps\",\n    \"run_id\",\"topic\",\"payload_bytes\",\"t_pub_human\",\"t_recv_human\",\n    \"latency_ms\",\"latency_s\",\"status\"\n  ]);\n\n  const perfRow = csv([\n    fmtTime(Date.now()),\n    o.mode,\n    o.path_class,\n    o.run_tag || \"\",\n    o.mqtt_version,\n    o.qos,\n    o.rate_mps,\n    o.run_id || \"\",\n    fullTopic,\n    payloadBytes,\n    fmtTime(t_pub),\n    fmtTime(t_recv),\n    Number.isFinite(latencyMs) ? latencyMs : \"\",\n    latencySec,\n    \"OK\"\n  ]);\n\n  const out1Msgs = [];\n  const perfHdrWritten = !!flow.get(perfHeaderKey);\n  const perfFileMissing = (fs && fs.existsSync) ? !fs.existsSync(perfPath) : !perfHdrWritten;\n  if (!perfHdrWritten || perfFileMissing) {\n    out1Msgs.push({ payload: perfHeader, filename: perfPath });\n    flow.set(perfHeaderKey, true);\n  }\n  out1Msgs.push({ payload: perfRow, filename: perfPath });\n\n  let out3 = null, out4 = null;\n  if (!flow.get(monKey)) {\n    flow.set(cntKey, 0);\n    out3 = { payload: cmd1 };\n    out4 = { payload: cmd2 };\n    flow.set(monKey, true);\n  }\n\n  let cnt = Number(flow.get(cntKey) || 0) + 1;\n  flow.set(cntKey, cnt);\n  node.status({ fill: 'blue', shape: 'dot', text: `${o.rate_mps ?? '?'} msg/s • ${cnt} msgs` });\n\n  return [out1Msgs, null, out3, out4];\n}\n\n// === 2) DONE message ===\nif (o.type === \"done\" && o.done === true) {\n  const cnt = Number(flow.get(cntKey) || 0);\n\n  // Common summary header (aligned with secure)\n  const sumHeader = csv([\n    \"ts_human\",\"mode\",\"path_class\",\"run_tag\",\"mqtt_version\",\"qos\",\"rate_mps\",\n    \"run_id\",\"count\",\"expected_count\",\"estimated_drop_count\",\"estimated_drop_pct\",\n    \"median_ms\",\"p95_ms\",\"p99_ms\",\"median_s\",\"p95_s\",\"p99_s\"\n  ]);\n\n  if (!arr.length) {\n    const hdrMsgs = [];\n    const sumHdrWritten = !!flow.get(sumHeaderKey);\n    const sumFileMissing = (fs && fs.existsSync) ? !fs.existsSync(sumPath) : !sumHdrWritten;\n    if (!sumHdrWritten || sumFileMissing) {\n      hdrMsgs.push({ payload: sumHeader, filename: sumPath });\n      flow.set(sumHeaderKey, true);\n    }\n    node.status({ fill: 'green', shape: 'dot', text: `done ${cnt} msgs @ ${o.rate_mps ?? '?'} msg/s` });\n    flow.set(monKey, false);\n    flow.set(cntKey, 0);\n    return [null, hdrMsgs, null, null];\n  }\n\n  arr.sort((a,b)=>a-b);\n  const q = p => arr[Math.min(arr.length-1, Math.floor(p*(arr.length-1)))];\n  const median = q(0.5);\n  const p95    = q(0.95);\n  const p99    = q(0.99);\n\n  const observedCount = arr.length;\n\n  let expectedCount;\n  if (Number.isFinite(totalMsgs) && totalMsgs > 0) {\n    expectedCount = Math.round(totalMsgs);\n  } else if (Number.isFinite(rateMps) && rateMps > 0 && Number.isFinite(durationSec) && durationSec > 0) {\n    expectedCount = Math.round(rateMps * durationSec);\n  } else {\n    expectedCount = observedCount;\n  }\n\n  if (expectedCount < observedCount) expectedCount = observedCount;\n\n  let dropCount = expectedCount - observedCount;\n  if (dropCount < 0) dropCount = 0;\n\n  const dropPct = expectedCount > 0 ? (dropCount / expectedCount) * 100 : 0;\n\n  const sumRow = csv([\n    fmtTime(Date.now()),\n    o.mode,\n    o.path_class,\n    o.run_tag || \"\",\n    o.mqtt_version,\n    o.qos,\n    o.rate_mps,\n    o.run_id || \"default\",\n    observedCount,\n    expectedCount,\n    dropCount,\n    dropPct.toFixed(1),\n    median,\n    p95,\n    p99,\n    (median/1000).toFixed(3),\n    (p95/1000).toFixed(3),\n    (p99/1000).toFixed(3)\n  ]);\n\n  flow.set(storeKey, []);\n  flow.set(monKey, false);\n  flow.set(cntKey, 0);\n  node.status({ fill: 'green', shape: 'dot', text: `done ${cnt} msgs @ ${o.rate_mps ?? '?'} msg/s` });\n\n  const out2Msgs = [];\n  const sumHdrWritten = !!flow.get(sumHeaderKey);\n  const sumFileMissing = (fs && fs.existsSync) ? !fs.existsSync(sumPath) : !sumHdrWritten;\n  if (!sumHdrWritten || sumFileMissing) {\n    out2Msgs.push({ payload: sumHeader, filename: sumPath });\n    flow.set(sumHeaderKey, true);\n  }\n  out2Msgs.push({ payload: sumRow, filename: sumPath });\n\n  return [null, out2Msgs, null, null];\n}\n\n// Anything else → no-op\nreturn [null, null, null, null];\n",
+        "outputs": 4,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 2060,
+        "y": 340,
+        "wires": [
+            [
+                "3a36d3be8d7b87da"
+            ],
+            [
+                "81824fc33d95097a"
+            ],
+            [
+                "fd4b2aa951518903"
+            ],
+            [
+                "842806ded69c8396"
+            ]
+        ]
+    },
+    {
+        "id": "fd4b2aa951518903",
+        "type": "exec",
+        "z": "d715720c626fffcf",
+        "command": "",
+        "addpay": true,
+        "append": "",
+        "useSpawn": "false",
+        "timer": "",
+        "oldrc": false,
+        "name": "Exec: start monitor (mosquitto)",
+        "x": 2590,
+        "y": 380,
+        "wires": [
+            [],
+            [],
+            []
+        ]
+    },
+    {
+        "id": "842806ded69c8396",
+        "type": "exec",
+        "z": "d715720c626fffcf",
+        "command": "",
+        "addpay": true,
+        "append": "",
+        "useSpawn": "false",
+        "timer": "",
+        "oldrc": false,
+        "name": "Exec: start monitor (node-red)",
+        "x": 2610,
+        "y": 500,
+        "wires": [
+            [],
+            [],
+            []
+        ]
+    },
+    {
+        "id": "80d25fe4673750cb",
+        "type": "file",
+        "z": "d715720c626fffcf",
+        "name": "CSV: bob_perf.csv (via msg.filename)",
+        "filename": "filename",
+        "filenameType": "msg",
+        "appendNewline": true,
+        "createDir": true,
+        "overwriteFile": "false",
+        "encoding": "none",
+        "x": 1060,
+        "y": 580,
+        "wires": [
+            []
+        ]
+    },
+    {
+        "id": "4a12af5574d16674",
+        "type": "file",
+        "z": "d715720c626fffcf",
+        "name": "CSV: bob_perf.csv (via msg.filename)",
+        "filename": "filename",
+        "filenameType": "msg",
+        "appendNewline": true,
+        "createDir": true,
+        "overwriteFile": "false",
+        "encoding": "none",
+        "x": 1030,
+        "y": 1020,
+        "wires": [
+            []
+        ]
+    },
+    {
+        "id": "3a36d3be8d7b87da",
+        "type": "file",
+        "z": "d715720c626fffcf",
+        "name": "CSV: bob_perf.csv (via msg.filename)",
+        "filename": "filename",
+        "filenameType": "msg",
+        "appendNewline": true,
+        "createDir": true,
+        "overwriteFile": "false",
+        "encoding": "none",
+        "x": 2610,
+        "y": 200,
+        "wires": [
+            []
+        ]
+    },
+    {
+        "id": "0c1d4cae9c284725",
+        "type": "comment",
+        "z": "d715720c626fffcf",
+        "name": "with birdge QoS1",
+        "info": "",
+        "x": 1620,
+        "y": 620,
+        "wires": []
+    },
+    {
+        "id": "d447e2ab961d2ff1",
+        "type": "mqtt in",
+        "z": "d715720c626fffcf",
+        "name": "Data recieved via Cake",
+        "topic": "home/alice/qos1",
+        "qos": "1",
+        "datatype": "auto-detect",
+        "broker": "56aa58dc871c111d",
+        "nl": false,
+        "rap": true,
+        "rh": 0,
+        "inputs": 0,
+        "x": 1620,
+        "y": 700,
+        "wires": [
+            [
+                "89b2fc4696e28ec8"
+            ]
+        ]
+    },
+    {
+        "id": "d90bed1f3f90936f",
+        "type": "file",
+        "z": "d715720c626fffcf",
+        "name": "CSV: summary_latency.csv (via msg.filename)",
+        "filename": "",
+        "appendNewline": true,
+        "createDir": true,
+        "overwriteFile": "false",
+        "encoding": "none",
+        "x": 2700,
+        "y": 780,
+        "wires": [
+            []
+        ]
+    },
+    {
+        "id": "89b2fc4696e28ec8",
+        "type": "function",
+        "z": "d715720c626fffcf",
+        "name": "Parse + Latency → bob_perf & Summary (+2 monitor cmds, 4 out)",
+        "func": "// Output 1: per-message CSV (bob_perf.csv)\n// Output 2: per-run summary CSV (summary_latency.csv)\n// Output 3: start monitor script for mosquitto\n// Output 4: start monitor script for node-red\n\nfunction ensureObj(payload) {\n  if (payload && typeof payload === 'object') return payload;\n  try { return JSON.parse(payload); } catch { return {}; }\n}\n\nfunction fmtTime(ms){\n  if(!Number.isFinite(ms)) return \"\";\n  const d = new Date(ms);\n  const p = n => String(n).padStart(2,\"0\");\n  const ms3 = String(d.getMilliseconds()).padStart(3,\"0\");\n  return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} `\n       + `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}.${ms3}`;\n}\n\nconst csv = arr => arr.map(v => (v===undefined?\"\":v)).join(\",\");\n\nconst fs = global.get('fs');\n\n// === 0) Parse inbound payload & basic meta ===\nconst o = ensureObj(msg.payload);\nconst topicParts = (msg.topic || \"\").split(\"/\");\nmsg.device_name = topicParts[1] || \"unknown\";\nconst fullTopic = msg.topic || \"\";\n\nconst runKey   = String(o.run_id || o.run_tag || \"default\");\nconst storeKey = `lat_store_${runKey}`;\nconst monKey   = `lat_mon_started_${runKey}`;\nconst cntKey   = `lat_msg_count_${runKey}`;\nlet arr = flow.get(storeKey) || [];\n\n// header flags (versioned) – bump to v4 because header layout changed\nconst perfHeaderKey = \"perf_header_written_v4\";\nconst sumHeaderKey  = \"summary_header_written_v4\";\n\n// Monitoring script base path (Termux / Bob)\nconst runTag  = String(o.run_tag || \"run\");\nconst qosArg  = String(o.qos ?? \"\");\nconst mqttArg = String(o.mqtt_version ?? \"\");\n\n// Derive duration (seconds) for monitors\nlet durationSec = Number(o.duration || 0);\nconst totalMsgs = Number(o.total || 0);\nconst rateMps   = Number(o.rate_mps || 0);\n\nif (!Number.isFinite(durationSec) || durationSec <= 0) {\n  if (Number.isFinite(totalMsgs) && totalMsgs > 0 && Number.isFinite(rateMps) && rateMps > 0) {\n    durationSec = Math.max(10, Math.ceil(totalMsgs / rateMps));\n  } else {\n    durationSec = 120; // fallback\n  }\n}\n\nconst scriptPath = `/data/data/com.termux/files/home/.node-red/perf_results/monitor_sys_stats.sh`;\nconst cmd1 = `${scriptPath} ${runTag} mosquitto ${qosArg} ${mqttArg} ${durationSec}`;\nconst cmd2 = `${scriptPath} ${runTag} node-red ${qosArg} ${mqttArg} ${durationSec}`;\n\n// files\nconst perfPath = `/data/data/com.termux/files/home/.node-red/perf_results/bob_perf.csv`;\nconst sumPath  = `/data/data/com.termux/files/home/.node-red/perf_results/summary_latency.csv`;\n\n// === 1) DATA messages ===\nif (o.type === \"data\") {\n  const t_pub  = Number(o.t_pub);\n  const t_recv = Date.now();\n  const latencyMs  = Number.isFinite(t_pub) ? (t_recv - t_pub) : NaN;\n  const latencySec = Number.isFinite(latencyMs) ? (latencyMs / 1000).toFixed(3) : \"\";\n\n  const temp = o.data;\n  node.warn(`${msg.device_name} home temperature is ${temp}`);\n\n  if (Number.isFinite(latencyMs)) {\n    arr.push(latencyMs);\n    flow.set(storeKey, arr);\n  }\n\n  // payload_bytes: full JSON payload size (data + meta)\n  let rawPayload;\n  if (typeof msg.payload === \"string\") {\n    rawPayload = msg.payload;\n  } else {\n    try {\n      rawPayload = JSON.stringify(msg.payload);\n    } catch (e) {\n      rawPayload = \"\";\n    }\n  }\n  const payloadBytes = Buffer.byteLength(rawPayload, \"utf8\");\n\n  // Common perf header (aligned with secure)\n  const perfHeader = csv([\n    \"ts_human\",\"mode\",\"path_class\",\"run_tag\",\"mqtt_version\",\"qos\",\"rate_mps\",\n    \"run_id\",\"topic\",\"payload_bytes\",\"t_pub_human\",\"t_recv_human\",\n    \"latency_ms\",\"latency_s\",\"status\"\n  ]);\n\n  const perfRow = csv([\n    fmtTime(Date.now()),\n    o.mode,\n    o.path_class,\n    o.run_tag || \"\",\n    o.mqtt_version,\n    o.qos,\n    o.rate_mps,\n    o.run_id || \"\",\n    fullTopic,\n    payloadBytes,\n    fmtTime(t_pub),\n    fmtTime(t_recv),\n    Number.isFinite(latencyMs) ? latencyMs : \"\",\n    latencySec,\n    \"OK\"\n  ]);\n\n  const out1Msgs = [];\n  const perfHdrWritten = !!flow.get(perfHeaderKey);\n  const perfFileMissing = (fs && fs.existsSync) ? !fs.existsSync(perfPath) : !perfHdrWritten;\n  if (!perfHdrWritten || perfFileMissing) {\n    out1Msgs.push({ payload: perfHeader, filename: perfPath });\n    flow.set(perfHeaderKey, true);\n  }\n  out1Msgs.push({ payload: perfRow, filename: perfPath });\n\n  let out3 = null, out4 = null;\n  if (!flow.get(monKey)) {\n    flow.set(cntKey, 0);\n    out3 = { payload: cmd1 };\n    out4 = { payload: cmd2 };\n    flow.set(monKey, true);\n  }\n\n  let cnt = Number(flow.get(cntKey) || 0) + 1;\n  flow.set(cntKey, cnt);\n  node.status({ fill: 'blue', shape: 'dot', text: `${o.rate_mps ?? '?'} msg/s • ${cnt} msgs` });\n\n  return [out1Msgs, null, out3, out4];\n}\n\n// === 2) DONE message ===\nif (o.type === \"done\" && o.done === true) {\n  const cnt = Number(flow.get(cntKey) || 0);\n\n  // Common summary header (aligned with secure)\n  const sumHeader = csv([\n    \"ts_human\",\"mode\",\"path_class\",\"run_tag\",\"mqtt_version\",\"qos\",\"rate_mps\",\n    \"run_id\",\"count\",\"expected_count\",\"estimated_drop_count\",\"estimated_drop_pct\",\n    \"median_ms\",\"p95_ms\",\"p99_ms\",\"median_s\",\"p95_s\",\"p99_s\"\n  ]);\n\n  if (!arr.length) {\n    const hdrMsgs = [];\n    const sumHdrWritten = !!flow.get(sumHeaderKey);\n    const sumFileMissing = (fs && fs.existsSync) ? !fs.existsSync(sumPath) : !sumHdrWritten;\n    if (!sumHdrWritten || sumFileMissing) {\n      hdrMsgs.push({ payload: sumHeader, filename: sumPath });\n      flow.set(sumHeaderKey, true);\n    }\n    node.status({ fill: 'green', shape: 'dot', text: `done ${cnt} msgs @ ${o.rate_mps ?? '?'} msg/s` });\n    flow.set(monKey, false);\n    flow.set(cntKey, 0);\n    return [null, hdrMsgs, null, null];\n  }\n\n  arr.sort((a,b)=>a-b);\n  const q = p => arr[Math.min(arr.length-1, Math.floor(p*(arr.length-1)))];\n  const median = q(0.5);\n  const p95    = q(0.95);\n  const p99    = q(0.99);\n\n  const observedCount = arr.length;\n\n  let expectedCount;\n  if (Number.isFinite(totalMsgs) && totalMsgs > 0) {\n    expectedCount = Math.round(totalMsgs);\n  } else if (Number.isFinite(rateMps) && rateMps > 0 && Number.isFinite(durationSec) && durationSec > 0) {\n    expectedCount = Math.round(rateMps * durationSec);\n  } else {\n    expectedCount = observedCount;\n  }\n\n  if (expectedCount < observedCount) expectedCount = observedCount;\n\n  let dropCount = expectedCount - observedCount;\n  if (dropCount < 0) dropCount = 0;\n\n  const dropPct = expectedCount > 0 ? (dropCount / expectedCount) * 100 : 0;\n\n  const sumRow = csv([\n    fmtTime(Date.now()),\n    o.mode,\n    o.path_class,\n    o.run_tag || \"\",\n    o.mqtt_version,\n    o.qos,\n    o.rate_mps,\n    o.run_id || \"default\",\n    observedCount,\n    expectedCount,\n    dropCount,\n    dropPct.toFixed(1),\n    median,\n    p95,\n    p99,\n    (median/1000).toFixed(3),\n    (p95/1000).toFixed(3),\n    (p99/1000).toFixed(3)\n  ]);\n\n  flow.set(storeKey, []);\n  flow.set(monKey, false);\n  flow.set(cntKey, 0);\n  node.status({ fill: 'green', shape: 'dot', text: `done ${cnt} msgs @ ${o.rate_mps ?? '?'} msg/s` });\n\n  const out2Msgs = [];\n  const sumHdrWritten = !!flow.get(sumHeaderKey);\n  const sumFileMissing = (fs && fs.existsSync) ? !fs.existsSync(sumPath) : !sumHdrWritten;\n  if (!sumHdrWritten || sumFileMissing) {\n    out2Msgs.push({ payload: sumHeader, filename: sumPath });\n    flow.set(sumHeaderKey, true);\n  }\n  out2Msgs.push({ payload: sumRow, filename: sumPath });\n\n  return [null, out2Msgs, null, null];\n}\n\n// Anything else → no-op\nreturn [null, null, null, null];\n",
+        "outputs": 4,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 2100,
+        "y": 700,
+        "wires": [
+            [
+                "1697833e9393e83b"
+            ],
+            [
+                "d90bed1f3f90936f"
+            ],
+            [
+                "0bbbc79712254543"
+            ],
+            [
+                "bd8f0954cb7a8e12"
+            ]
+        ]
+    },
+    {
+        "id": "0bbbc79712254543",
+        "type": "exec",
+        "z": "d715720c626fffcf",
+        "command": "",
+        "addpay": true,
+        "append": "",
+        "useSpawn": "false",
+        "timer": "",
+        "oldrc": false,
+        "name": "Exec: start monitor (mosquitto)",
+        "x": 2670,
+        "y": 860,
+        "wires": [
+            [],
+            [],
+            []
+        ]
+    },
+    {
+        "id": "bd8f0954cb7a8e12",
+        "type": "exec",
+        "z": "d715720c626fffcf",
+        "command": "",
+        "addpay": true,
+        "append": "",
+        "useSpawn": "false",
+        "timer": "",
+        "oldrc": false,
+        "name": "Exec: start monitor (node-red)",
+        "x": 2670,
+        "y": 960,
+        "wires": [
+            [],
+            [],
+            []
+        ]
+    },
+    {
+        "id": "1697833e9393e83b",
+        "type": "file",
+        "z": "d715720c626fffcf",
+        "name": "CSV: bob_perf.csv (via msg.filename)",
+        "filename": "filename",
+        "filenameType": "msg",
+        "appendNewline": true,
+        "createDir": true,
+        "overwriteFile": "false",
+        "encoding": "none",
+        "x": 2670,
+        "y": 660,
+        "wires": [
+            []
+        ]
+    },
+    {
+        "id": "a3391bdb6b4398f7",
+        "type": "comment",
+        "z": "d715720c626fffcf",
+        "name": "with birdge QOS2",
+        "info": "",
+        "x": 1650,
+        "y": 1160,
+        "wires": []
+    },
+    {
+        "id": "55d7c469e7e22681",
+        "type": "mqtt in",
+        "z": "d715720c626fffcf",
+        "name": "Data recieved via Cake",
+        "topic": "home/alice/qos2",
+        "qos": "2",
+        "datatype": "auto-detect",
+        "broker": "56aa58dc871c111d",
+        "nl": false,
+        "rap": true,
+        "rh": 0,
+        "inputs": 0,
+        "x": 1660,
+        "y": 1240,
+        "wires": [
+            [
+                "f7fc09d695e1fea2"
+            ]
+        ]
+    },
+    {
+        "id": "515ce981897ba910",
+        "type": "file",
+        "z": "d715720c626fffcf",
+        "name": "CSV: summary_latency.csv (via msg.filename)",
+        "filename": "",
+        "appendNewline": true,
+        "createDir": true,
+        "overwriteFile": "false",
+        "encoding": "none",
+        "x": 2660,
+        "y": 1220,
+        "wires": [
+            []
+        ]
+    },
+    {
+        "id": "f7fc09d695e1fea2",
+        "type": "function",
+        "z": "d715720c626fffcf",
+        "name": "Parse + Latency → bob_perf & Summary (+2 monitor cmds, 4 out)",
+        "func": "// Output 1: per-message CSV (bob_perf.csv)\n// Output 2: per-run summary CSV (summary_latency.csv)\n// Output 3: start monitor script for mosquitto\n// Output 4: start monitor script for node-red\n\nfunction ensureObj(payload) {\n  if (payload && typeof payload === 'object') return payload;\n  try { return JSON.parse(payload); } catch { return {}; }\n}\n\nfunction fmtTime(ms){\n  if(!Number.isFinite(ms)) return \"\";\n  const d = new Date(ms);\n  const p = n => String(n).padStart(2,\"0\");\n  const ms3 = String(d.getMilliseconds()).padStart(3,\"0\");\n  return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} `\n       + `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}.${ms3}`;\n}\n\nconst csv = arr => arr.map(v => (v===undefined?\"\":v)).join(\",\");\n\nconst fs = global.get('fs');\n\n// === 0) Parse inbound payload & basic meta ===\nconst o = ensureObj(msg.payload);\nconst topicParts = (msg.topic || \"\").split(\"/\");\nmsg.device_name = topicParts[1] || \"unknown\";\nconst fullTopic = msg.topic || \"\";\n\nconst runKey   = String(o.run_id || o.run_tag || \"default\");\nconst storeKey = `lat_store_${runKey}`;\nconst monKey   = `lat_mon_started_${runKey}`;\nconst cntKey   = `lat_msg_count_${runKey}`;\nlet arr = flow.get(storeKey) || [];\n\n// header flags (versioned) – bump to v4 because header layout changed\nconst perfHeaderKey = \"perf_header_written_v4\";\nconst sumHeaderKey  = \"summary_header_written_v4\";\n\n// Monitoring script base path (Termux / Bob)\nconst runTag  = String(o.run_tag || \"run\");\nconst qosArg  = String(o.qos ?? \"\");\nconst mqttArg = String(o.mqtt_version ?? \"\");\n\n// Derive duration (seconds) for monitors\nlet durationSec = Number(o.duration || 0);\nconst totalMsgs = Number(o.total || 0);\nconst rateMps   = Number(o.rate_mps || 0);\n\nif (!Number.isFinite(durationSec) || durationSec <= 0) {\n  if (Number.isFinite(totalMsgs) && totalMsgs > 0 && Number.isFinite(rateMps) && rateMps > 0) {\n    durationSec = Math.max(10, Math.ceil(totalMsgs / rateMps));\n  } else {\n    durationSec = 120; // fallback\n  }\n}\n\nconst scriptPath = `/data/data/com.termux/files/home/.node-red/perf_results/monitor_sys_stats.sh`;\nconst cmd1 = `${scriptPath} ${runTag} mosquitto ${qosArg} ${mqttArg} ${durationSec}`;\nconst cmd2 = `${scriptPath} ${runTag} node-red ${qosArg} ${mqttArg} ${durationSec}`;\n\n// files\nconst perfPath = `/data/data/com.termux/files/home/.node-red/perf_results/bob_perf.csv`;\nconst sumPath  = `/data/data/com.termux/files/home/.node-red/perf_results/summary_latency.csv`;\n\n// === 1) DATA messages ===\nif (o.type === \"data\") {\n  const t_pub  = Number(o.t_pub);\n  const t_recv = Date.now();\n  const latencyMs  = Number.isFinite(t_pub) ? (t_recv - t_pub) : NaN;\n  const latencySec = Number.isFinite(latencyMs) ? (latencyMs / 1000).toFixed(3) : \"\";\n\n  const temp = o.data;\n  node.warn(`${msg.device_name} home temperature is ${temp}`);\n\n  if (Number.isFinite(latencyMs)) {\n    arr.push(latencyMs);\n    flow.set(storeKey, arr);\n  }\n\n  // payload_bytes: full JSON payload size (data + meta)\n  let rawPayload;\n  if (typeof msg.payload === \"string\") {\n    rawPayload = msg.payload;\n  } else {\n    try {\n      rawPayload = JSON.stringify(msg.payload);\n    } catch (e) {\n      rawPayload = \"\";\n    }\n  }\n  const payloadBytes = Buffer.byteLength(rawPayload, \"utf8\");\n\n  // Common perf header (aligned with secure)\n  const perfHeader = csv([\n    \"ts_human\",\"mode\",\"path_class\",\"run_tag\",\"mqtt_version\",\"qos\",\"rate_mps\",\n    \"run_id\",\"topic\",\"payload_bytes\",\"t_pub_human\",\"t_recv_human\",\n    \"latency_ms\",\"latency_s\",\"status\"\n  ]);\n\n  const perfRow = csv([\n    fmtTime(Date.now()),\n    o.mode,\n    o.path_class,\n    o.run_tag || \"\",\n    o.mqtt_version,\n    o.qos,\n    o.rate_mps,\n    o.run_id || \"\",\n    fullTopic,\n    payloadBytes,\n    fmtTime(t_pub),\n    fmtTime(t_recv),\n    Number.isFinite(latencyMs) ? latencyMs : \"\",\n    latencySec,\n    \"OK\"\n  ]);\n\n  const out1Msgs = [];\n  const perfHdrWritten = !!flow.get(perfHeaderKey);\n  const perfFileMissing = (fs && fs.existsSync) ? !fs.existsSync(perfPath) : !perfHdrWritten;\n  if (!perfHdrWritten || perfFileMissing) {\n    out1Msgs.push({ payload: perfHeader, filename: perfPath });\n    flow.set(perfHeaderKey, true);\n  }\n  out1Msgs.push({ payload: perfRow, filename: perfPath });\n\n  let out3 = null, out4 = null;\n  if (!flow.get(monKey)) {\n    flow.set(cntKey, 0);\n    out3 = { payload: cmd1 };\n    out4 = { payload: cmd2 };\n    flow.set(monKey, true);\n  }\n\n  let cnt = Number(flow.get(cntKey) || 0) + 1;\n  flow.set(cntKey, cnt);\n  node.status({ fill: 'blue', shape: 'dot', text: `${o.rate_mps ?? '?'} msg/s • ${cnt} msgs` });\n\n  return [out1Msgs, null, out3, out4];\n}\n\n// === 2) DONE message ===\nif (o.type === \"done\" && o.done === true) {\n  const cnt = Number(flow.get(cntKey) || 0);\n\n  // Common summary header (aligned with secure)\n  const sumHeader = csv([\n    \"ts_human\",\"mode\",\"path_class\",\"run_tag\",\"mqtt_version\",\"qos\",\"rate_mps\",\n    \"run_id\",\"count\",\"expected_count\",\"estimated_drop_count\",\"estimated_drop_pct\",\n    \"median_ms\",\"p95_ms\",\"p99_ms\",\"median_s\",\"p95_s\",\"p99_s\"\n  ]);\n\n  if (!arr.length) {\n    const hdrMsgs = [];\n    const sumHdrWritten = !!flow.get(sumHeaderKey);\n    const sumFileMissing = (fs && fs.existsSync) ? !fs.existsSync(sumPath) : !sumHdrWritten;\n    if (!sumHdrWritten || sumFileMissing) {\n      hdrMsgs.push({ payload: sumHeader, filename: sumPath });\n      flow.set(sumHeaderKey, true);\n    }\n    node.status({ fill: 'green', shape: 'dot', text: `done ${cnt} msgs @ ${o.rate_mps ?? '?'} msg/s` });\n    flow.set(monKey, false);\n    flow.set(cntKey, 0);\n    return [null, hdrMsgs, null, null];\n  }\n\n  arr.sort((a,b)=>a-b);\n  const q = p => arr[Math.min(arr.length-1, Math.floor(p*(arr.length-1)))];\n  const median = q(0.5);\n  const p95    = q(0.95);\n  const p99    = q(0.99);\n\n  const observedCount = arr.length;\n\n  let expectedCount;\n  if (Number.isFinite(totalMsgs) && totalMsgs > 0) {\n    expectedCount = Math.round(totalMsgs);\n  } else if (Number.isFinite(rateMps) && rateMps > 0 && Number.isFinite(durationSec) && durationSec > 0) {\n    expectedCount = Math.round(rateMps * durationSec);\n  } else {\n    expectedCount = observedCount;\n  }\n\n  if (expectedCount < observedCount) expectedCount = observedCount;\n\n  let dropCount = expectedCount - observedCount;\n  if (dropCount < 0) dropCount = 0;\n\n  const dropPct = expectedCount > 0 ? (dropCount / expectedCount) * 100 : 0;\n\n  const sumRow = csv([\n    fmtTime(Date.now()),\n    o.mode,\n    o.path_class,\n    o.run_tag || \"\",\n    o.mqtt_version,\n    o.qos,\n    o.rate_mps,\n    o.run_id || \"default\",\n    observedCount,\n    expectedCount,\n    dropCount,\n    dropPct.toFixed(1),\n    median,\n    p95,\n    p99,\n    (median/1000).toFixed(3),\n    (p95/1000).toFixed(3),\n    (p99/1000).toFixed(3)\n  ]);\n\n  flow.set(storeKey, []);\n  flow.set(monKey, false);\n  flow.set(cntKey, 0);\n  node.status({ fill: 'green', shape: 'dot', text: `done ${cnt} msgs @ ${o.rate_mps ?? '?'} msg/s` });\n\n  const out2Msgs = [];\n  const sumHdrWritten = !!flow.get(sumHeaderKey);\n  const sumFileMissing = (fs && fs.existsSync) ? !fs.existsSync(sumPath) : !sumHdrWritten;\n  if (!sumHdrWritten || sumFileMissing) {\n    out2Msgs.push({ payload: sumHeader, filename: sumPath });\n    flow.set(sumHeaderKey, true);\n  }\n  out2Msgs.push({ payload: sumRow, filename: sumPath });\n\n  return [null, out2Msgs, null, null];\n}\n\n// Anything else → no-op\nreturn [null, null, null, null];\n",
+        "outputs": 4,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 2080,
+        "y": 1240,
+        "wires": [
+            [
+                "db84332b10b12e04"
+            ],
+            [
+                "515ce981897ba910"
+            ],
+            [
+                "c715b26d50cfac8d"
+            ],
+            [
+                "a37461de98ec7460"
+            ]
+        ]
+    },
+    {
+        "id": "c715b26d50cfac8d",
+        "type": "exec",
+        "z": "d715720c626fffcf",
+        "command": "",
+        "addpay": true,
+        "append": "",
+        "useSpawn": "false",
+        "timer": "",
+        "oldrc": false,
+        "name": "Exec: start monitor (mosquitto)",
+        "x": 2630,
+        "y": 1300,
+        "wires": [
+            [],
+            [],
+            []
+        ]
+    },
+    {
+        "id": "a37461de98ec7460",
+        "type": "exec",
+        "z": "d715720c626fffcf",
+        "command": "",
+        "addpay": true,
+        "append": "",
+        "useSpawn": "false",
+        "timer": "",
+        "oldrc": false,
+        "name": "Exec: start monitor (node-red)",
+        "x": 2630,
+        "y": 1400,
+        "wires": [
+            [],
+            [],
+            []
+        ]
+    },
+    {
+        "id": "db84332b10b12e04",
+        "type": "file",
+        "z": "d715720c626fffcf",
+        "name": "CSV: bob_perf.csv (via msg.filename)",
+        "filename": "filename",
+        "filenameType": "msg",
+        "appendNewline": true,
+        "createDir": true,
+        "overwriteFile": "false",
+        "encoding": "none",
+        "x": 2630,
+        "y": 1100,
+        "wires": [
+            []
+        ]
+    },
+    {
+        "id": "bb33215539e3b591",
+        "type": "file",
+        "z": "d715720c626fffcf",
+        "name": "CSV: summary_latency.csv (via msg.filename)",
+        "filename": "filename",
+        "filenameType": "msg",
+        "appendNewline": true,
+        "createDir": true,
+        "overwriteFile": "false",
+        "encoding": "none",
+        "x": 1060,
+        "y": 320,
+        "wires": [
+            []
+        ]
+    },
+    {
+        "id": "f1fdcf7bde386a7f",
+        "type": "mqtt in",
+        "z": "d715720c626fffcf",
+        "name": "Data received via Sunny",
+        "topic": "alice/temp/qos0",
+        "qos": "0",
+        "datatype": "auto",
+        "broker": "873502a2020d1559",
+        "nl": false,
+        "rap": true,
+        "rh": 0,
+        "inputs": 0,
+        "x": 170,
+        "y": 320,
+        "wires": [
+            [
+                "0e7d2a4bbaeec3b1"
+            ]
+        ]
+    },
+    {
+        "id": "0e7d2a4bbaeec3b1",
+        "type": "function",
+        "z": "d715720c626fffcf",
+        "name": "Parse + Latency → bob_perf & Summary (+2 monitor cmds, 4 out)",
+        "func": "// Output 1: per-message CSV (bob_perf.csv)\n// Output 2: per-run summary CSV (summary_latency.csv)\n// Output 3: start monitor script for mosquitto\n// Output 4: start monitor script for node-red\n\nfunction ensureObj(payload) {\n  if (payload && typeof payload === 'object') return payload;\n  try { return JSON.parse(payload); } catch { return {}; }\n}\n\nfunction fmtTime(ms) {\n  if (!Number.isFinite(ms)) return \"\";\n  const d = new Date(ms);\n  const p = n => String(n).padStart(2, \"0\");\n  const ms3 = String(d.getMilliseconds()).padStart(3, \"0\");\n  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} `\n    + `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}.${ms3}`;\n}\n\nconst csv = arr => arr.map(v => (v === undefined ? \"\" : v)).join(\",\");\n\nconst fs = global.get('fs');\n\n// === 0) Parse inbound payload & basic meta ===\nconst o = ensureObj(msg.payload);\nconst topicParts = (msg.topic || \"\").split(\"/\");\nmsg.device_name = topicParts[0] || \"unknown\";\nconst fullTopic = msg.topic || \"\";\n\nconst runKey = String(o.run_id || o.run_tag || \"default\");\nconst storeKey = `lat_store_${runKey}`;\nconst monKey = `lat_mon_started_${runKey}`;\nconst cntKey = `lat_msg_count_${runKey}`;\nlet arr = flow.get(storeKey) || [];\n\n// header flags (versioned) – bump to v4 because header layout changed\nconst perfHeaderKey = \"perf_header_written_v4\";\nconst sumHeaderKey = \"summary_header_written_v4\";\n\n// Monitoring script base path (Termux / Bob)\nconst runTag = String(o.run_tag || \"run\");\nconst qosArg = String(o.qos ?? \"\");\nconst mqttArg = String(o.mqtt_version ?? \"\");\n\n// Derive duration (seconds) for monitors\nlet durationSec = Number(o.duration || 0);\nconst totalMsgs = Number(o.total || 0);\nconst rateMps = Number(o.rate_mps || 0);\n\nif (!Number.isFinite(durationSec) || durationSec <= 0) {\n  if (Number.isFinite(totalMsgs) && totalMsgs > 0 && Number.isFinite(rateMps) && rateMps > 0) {\n    durationSec = Math.max(10, Math.ceil(totalMsgs / rateMps));\n  } else {\n    durationSec = 120; // fallback\n  }\n}\n\nconst scriptPath = `/data/data/com.termux/files/home/.node-red/perf_results/monitor_sys_stats.sh`;\nconst cmd1 = `${scriptPath} ${runTag} mosquitto ${qosArg} ${mqttArg} ${durationSec}`;\nconst cmd2 = `${scriptPath} ${runTag} node-red ${qosArg} ${mqttArg} ${durationSec}`;\n\n// files\nconst perfPath = `/data/data/com.termux/files/home/.node-red/perf_results/bob_perf.csv`;\nconst sumPath = `/data/data/com.termux/files/home/.node-red/perf_results/summary_latency.csv`;\n\n// === 1) DATA messages ===\nif (o.type === \"data\") {\n  const t_pub = Number(o.t_pub);\n  const t_recv = Date.now();\n  const latencyMs = Number.isFinite(t_pub) ? (t_recv - t_pub) : NaN;\n  const latencySec = Number.isFinite(latencyMs) ? (latencyMs / 1000).toFixed(3) : \"\";\n\n  const temp = o.data;\n  node.warn(`${msg.device_name} home temperature is ${temp}`);\n\n  if (Number.isFinite(latencyMs)) {\n    arr.push(latencyMs);\n    flow.set(storeKey, arr);\n  }\n\n  // payload_bytes: full JSON payload size (data + meta)\n  let rawPayload;\n  if (typeof msg.payload === \"string\") {\n    rawPayload = msg.payload;\n  } else {\n    try {\n      rawPayload = JSON.stringify(msg.payload);\n    } catch (e) {\n      rawPayload = \"\";\n    }\n  }\n  const payloadBytes = Buffer.byteLength(rawPayload, \"utf8\");\n\n  // Common perf header (aligned with secure)\n  const perfHeader = csv([\n    \"ts_human\", \"mode\", \"path_class\", \"run_tag\", \"mqtt_version\", \"qos\", \"rate_mps\",\n    \"run_id\", \"topic\", \"payload_bytes\", \"t_pub_human\", \"t_recv_human\",\n    \"latency_ms\", \"latency_s\", \"status\"\n  ]);\n\n  const perfRow = csv([\n    fmtTime(Date.now()),\n    o.mode,\n    o.path_class,\n    o.run_tag || \"\",\n    o.mqtt_version,\n    o.qos,\n    o.rate_mps,\n    o.run_id || \"\",\n    fullTopic,\n    payloadBytes,\n    fmtTime(t_pub),\n    fmtTime(t_recv),\n    Number.isFinite(latencyMs) ? latencyMs : \"\",\n    latencySec,\n    \"OK\"\n  ]);\n\n  const out1Msgs = [];\n  const perfHdrWritten = !!flow.get(perfHeaderKey);\n  const perfFileMissing = (fs && fs.existsSync) ? !fs.existsSync(perfPath) : !perfHdrWritten;\n  if (!perfHdrWritten || perfFileMissing) {\n    out1Msgs.push({ payload: perfHeader, filename: perfPath });\n    flow.set(perfHeaderKey, true);\n  }\n  out1Msgs.push({ payload: perfRow, filename: perfPath });\n\n  let out3 = null, out4 = null;\n  if (!flow.get(monKey)) {\n    flow.set(cntKey, 0);\n    out3 = { payload: cmd1 };\n    out4 = { payload: cmd2 };\n    flow.set(monKey, true);\n  }\n\n  let cnt = Number(flow.get(cntKey) || 0) + 1;\n  flow.set(cntKey, cnt);\n  node.status({ fill: 'blue', shape: 'dot', text: `${o.rate_mps ?? '?'} msg/s • ${cnt} msgs` });\n\n  return [out1Msgs, null, out3, out4];\n}\n\n// === 2) DONE message ===\nif (o.type === \"done\" && o.done === true) {\n  const cnt = Number(flow.get(cntKey) || 0);\n\n  // Common summary header (aligned with secure)\n  const sumHeader = csv([\n    \"ts_human\", \"mode\", \"path_class\", \"run_tag\", \"mqtt_version\", \"qos\", \"rate_mps\",\n    \"run_id\", \"count\", \"expected_count\", \"estimated_drop_count\", \"estimated_drop_pct\",\n    \"median_ms\", \"p95_ms\", \"p99_ms\", \"median_s\", \"p95_s\", \"p99_s\"\n  ]);\n\n  if (!arr.length) {\n    const hdrMsgs = [];\n    const sumHdrWritten = !!flow.get(sumHeaderKey);\n    const sumFileMissing = (fs && fs.existsSync) ? !fs.existsSync(sumPath) : !sumHdrWritten;\n    if (!sumHdrWritten || sumFileMissing) {\n      hdrMsgs.push({ payload: sumHeader, filename: sumPath });\n      flow.set(sumHeaderKey, true);\n    }\n    node.status({ fill: 'green', shape: 'dot', text: `done ${cnt} msgs @ ${o.rate_mps ?? '?'} msg/s` });\n    flow.set(monKey, false);\n    flow.set(cntKey, 0);\n    return [null, hdrMsgs, null, null];\n  }\n\n  arr.sort((a, b) => a - b);\n  const q = p => arr[Math.min(arr.length - 1, Math.floor(p * (arr.length - 1)))];\n  const median = q(0.5);\n  const p95 = q(0.95);\n  const p99 = q(0.99);\n\n  const observedCount = arr.length;\n\n  let expectedCount;\n  if (Number.isFinite(totalMsgs) && totalMsgs > 0) {\n    expectedCount = Math.round(totalMsgs);\n  } else if (Number.isFinite(rateMps) && rateMps > 0 && Number.isFinite(durationSec) && durationSec > 0) {\n    expectedCount = Math.round(rateMps * durationSec);\n  } else {\n    expectedCount = observedCount;\n  }\n\n  if (expectedCount < observedCount) expectedCount = observedCount;\n\n  let dropCount = expectedCount - observedCount;\n  if (dropCount < 0) dropCount = 0;\n\n  const dropPct = expectedCount > 0 ? (dropCount / expectedCount) * 100 : 0;\n\n  const sumRow = csv([\n    fmtTime(Date.now()),\n    o.mode,\n    o.path_class,\n    o.run_tag || \"\",\n    o.mqtt_version,\n    o.qos,\n    o.rate_mps,\n    o.run_id || \"default\",\n    observedCount,\n    expectedCount,\n    dropCount,\n    dropPct.toFixed(1),\n    median,\n    p95,\n    p99,\n    (median / 1000).toFixed(3),\n    (p95 / 1000).toFixed(3),\n    (p99 / 1000).toFixed(3)\n  ]);\n\n  flow.set(storeKey, []);\n  flow.set(monKey, false);\n  flow.set(cntKey, 0);\n  node.status({ fill: 'green', shape: 'dot', text: `done ${cnt} msgs @ ${o.rate_mps ?? '?'} msg/s` });\n\n  const out2Msgs = [];\n  const sumHdrWritten = !!flow.get(sumHeaderKey);\n  const sumFileMissing = (fs && fs.existsSync) ? !fs.existsSync(sumPath) : !sumHdrWritten;\n  if (!sumHdrWritten || sumFileMissing) {\n    out2Msgs.push({ payload: sumHeader, filename: sumPath });\n    flow.set(sumHeaderKey, true);\n  }\n  out2Msgs.push({ payload: sumRow, filename: sumPath });\n\n  return [null, out2Msgs, null, null];\n}\n\n// Anything else → no-op\nreturn [null, null, null, null];\n",
+        "outputs": 4,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 580,
+        "y": 320,
+        "wires": [
+            [
+                "e781c0db21cbb56c"
+            ],
+            [
+                "bb33215539e3b591"
+            ],
+            [
+                "e996dc8699d7bf99"
+            ],
+            [
+                "6f89f2925008d21d"
+            ]
+        ]
+    },
+    {
+        "id": "e781c0db21cbb56c",
+        "type": "file",
+        "z": "d715720c626fffcf",
+        "name": "CSV: bob_perf.csv (via msg.filename)",
+        "filename": "filename",
+        "filenameType": "msg",
+        "appendNewline": true,
+        "createDir": true,
+        "overwriteFile": "false",
+        "encoding": "none",
+        "x": 1010,
+        "y": 240,
+        "wires": [
+            []
+        ]
+    },
+    {
+        "id": "e996dc8699d7bf99",
+        "type": "exec",
+        "z": "d715720c626fffcf",
+        "command": "",
+        "addpay": true,
+        "append": "",
+        "useSpawn": "false",
+        "timer": "",
+        "oldrc": false,
+        "name": "Exec: start monitor (mosquitto)",
+        "x": 1050,
+        "y": 380,
+        "wires": [
+            [],
+            [],
+            []
+        ]
+    },
+    {
+        "id": "6f89f2925008d21d",
+        "type": "exec",
+        "z": "d715720c626fffcf",
+        "command": "",
+        "addpay": true,
+        "append": "",
+        "useSpawn": "false",
+        "timer": "",
+        "oldrc": false,
+        "name": "Exec: start monitor (node-red)",
+        "x": 1050,
+        "y": 460,
+        "wires": [
+            [],
+            [],
+            []
+        ]
+    },
+    {
+        "id": "56aa58dc871c111d",
+        "type": "mqtt-broker",
+        "name": "",
+        "broker": "192.168.154.1",
+        "port": 1883,
+        "clientid": "",
+        "autoConnect": true,
+        "usetls": false,
+        "protocolVersion": 4,
+        "keepalive": 60,
+        "cleansession": true,
+        "autoUnsubscribe": true,
+        "birthTopic": "",
+        "birthQos": "0",
+        "birthRetain": "false",
+        "birthPayload": "",
+        "birthMsg": {},
+        "closeTopic": "",
+        "closeQos": "0",
+        "closeRetain": "false",
+        "closePayload": "",
+        "closeMsg": {},
+        "willTopic": "",
+        "willQos": "0",
+        "willRetain": "false",
+        "willPayload": "",
+        "willMsg": {},
+        "userProps": "",
+        "sessionExpiry": ""
+    },
+    {
+        "id": "291c926844812879",
+        "type": "mqtt-broker",
+        "name": "",
+        "broker": "192.168.153.1",
+        "port": 1883,
+        "clientid": "",
+        "autoConnect": true,
+        "usetls": false,
+        "protocolVersion": 4,
+        "keepalive": 60,
+        "cleansession": true,
+        "autoUnsubscribe": true,
+        "birthTopic": "",
+        "birthQos": "0",
+        "birthRetain": "false",
+        "birthPayload": "",
+        "birthMsg": {},
+        "closeTopic": "",
+        "closeQos": "0",
+        "closeRetain": "false",
+        "closePayload": "",
+        "closeMsg": {},
+        "willTopic": "",
+        "willQos": "0",
+        "willRetain": "false",
+        "willPayload": "",
+        "willMsg": {},
+        "userProps": "",
+        "sessionExpiry": ""
+    },
+    {
+        "id": "873502a2020d1559",
+        "type": "mqtt-broker",
+        "name": "",
+        "broker": "192.168.151.1",
+        "port": "1883",
+        "clientid": "",
+        "autoConnect": true,
+        "usetls": false,
+        "protocolVersion": "4",
+        "keepalive": "60",
+        "cleansession": true,
+        "autoUnsubscribe": true,
+        "birthTopic": "",
+        "birthQos": "0",
+        "birthRetain": "false",
+        "birthPayload": "",
+        "birthMsg": {},
+        "closeTopic": "",
+        "closeQos": "0",
+        "closeRetain": "false",
+        "closePayload": "",
+        "closeMsg": {},
+        "willTopic": "",
+        "willQos": "0",
+        "willRetain": "false",
+        "willPayload": "",
+        "willMsg": {},
+        "userProps": "",
+        "sessionExpiry": ""
+    }
+]
