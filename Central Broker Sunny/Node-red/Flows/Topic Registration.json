@@ -1,0 +1,742 @@
+[
+    {
+        "id": "a24adc94c330c9a1",
+        "type": "tab",
+        "label": "Topic Registration",
+        "disabled": false,
+        "info": "",
+        "env": []
+    },
+    {
+        "id": "33c37f2f767c0ec9",
+        "type": "comment",
+        "z": "a24adc94c330c9a1",
+        "name": " MQTT Edge Broker (Sunny)",
+        "info": "",
+        "x": 840,
+        "y": 960,
+        "wires": []
+    },
+    {
+        "id": "2931d5afafbcffa2",
+        "type": "mqtt in",
+        "z": "a24adc94c330c9a1",
+        "name": "Recieved request for topic key",
+        "topic": "topic/key_req/+",
+        "qos": "0",
+        "datatype": "auto-detect",
+        "broker": "7c21cdd37769f825",
+        "nl": false,
+        "rap": true,
+        "rh": 0,
+        "inputs": 0,
+        "x": 1440,
+        "y": 1860,
+        "wires": [
+            [
+                "4dba3b77ec062a7f"
+            ]
+        ]
+    },
+    {
+        "id": "4dba3b77ec062a7f",
+        "type": "function",
+        "z": "a24adc94c330c9a1",
+        "name": "Save payload + build SQL (WAL)",
+        "func": "// Parse payload, cache fields needed for decrypt, and build SQL (with WAL/busy_timeout)\n\nconst parts = String(msg.topic||\"\").split(\"/\");\nmsg.device_name = parts[2] || \"\"; // topic/key_req/<device>\n\nconst p = msg.payload || {};\nconst deviceID  = String(p.device_id||\"\").trim();\nconst signature = String(p.signature||\"\").trim();\nconst encHex    = String(p.encryptedData||\"\").trim();\nconst ivHex     = String(p.iv||\"\").trim();\n\nif (!deviceID || !signature || !encHex || !ivHex) {\n  node.error(\"❌ Missing device_id/signature/encryptedData/iv\");\n  return null;\n}\n\n// store enc fields for later decrypt step\nflow.set(\"deviceID\", deviceID);\nflow.set(\"sign\", signature);\nflow.set(\"enc_keyreq_hex\", encHex);\nflow.set(\"iv_keyreq_hex\", ivHex);\n\n// Build SQL (WAL + busy_timeout) to fetch auth & public key\nconst dbPath    = \"/etc/mosquitto/certs/update_database.db\";\nconst pragmaKey = env.get(\"DB_PASSWORD\");\nconst safeDeviceID = deviceID.replace(/'/g, \"''\");\n\nconst sql = `\nPRAGMA key='${pragmaKey}';\nPRAGMA journal_mode=WAL;\nPRAGMA busy_timeout=5000;\nSELECT authentication_status FROM DeviceProfile WHERE device_id='${safeDeviceID}';\nSELECT public_key FROM Keys WHERE device_id='${safeDeviceID}';\n`;\n\nmsg.payload = `sqlcipher ${dbPath} <<< \"${sql.trim()}\"`;\n\nreturn msg;\n",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 1600,
+        "y": 1760,
+        "wires": [
+            [
+                "d45a6e404e49b98e"
+            ]
+        ]
+    },
+    {
+        "id": "d45a6e404e49b98e",
+        "type": "exec",
+        "z": "a24adc94c330c9a1",
+        "command": "",
+        "addpay": "payload",
+        "append": "",
+        "useSpawn": "false",
+        "timer": "",
+        "winHide": false,
+        "oldrc": false,
+        "name": "Select public key (WAL)",
+        "x": 1850,
+        "y": 1860,
+        "wires": [
+            [
+                "755ae32174a93ad8"
+            ],
+            [],
+            []
+        ]
+    },
+    {
+        "id": "755ae32174a93ad8",
+        "type": "function",
+        "z": "a24adc94c330c9a1",
+        "name": "Prepare to create topic key request secret key",
+        "func": "// Extract PEM and auth_status; write peer PEM; prepare ECDH derive.\nconst fs  = global.get('fs');\nconst out = String(msg.payload || '');\n\n// 1) Find PEM block\nconst pemMatch = out.match(/-----BEGIN PUBLIC KEY-----[\\s\\S]*?-----END PUBLIC KEY-----/);\nif (!pemMatch) {\n  node.error('❌ No public key (PEM) found.');\n  return null;\n}\n\nconst publicKeyPem = pemMatch[0].trim();\n\n// 2) Everything before PEM = status / pragma output\nconst beforePem = out.slice(0, pemMatch.index).trim();\n\n// Split into clean non-empty lines\nconst lines = beforePem\n  .split(/\\r?\\n/)\n  .map(s => s.trim())\n  .filter(Boolean);\n\nlet authentication_status = 'UNKNOWN';\n\n// Prefer a line that is exactly \"OK\" (case-insensitive)\nfor (let i = lines.length - 1; i >= 0; i--) {\n  if (/^ok$/i.test(lines[i])) {\n    authentication_status = 'OK';\n    break;\n  }\n}\n\n// If no explicit OK found, fall back to the last non-empty line\nif (authentication_status === 'UNKNOWN' && lines.length > 0) {\n  authentication_status = lines[lines.length - 1];\n}\n\n// Cache for later\nflow.set('peer_public_key_pem_tk', publicKeyPem);\nflow.set('authentication_status_tk', authentication_status);\n\nconst devName     = msg.device_name || 'unknown';\nconst peerPubPath = `/etc/mosquitto/certs/${devName}-public-key.pem`;\n\ntry {\n  fs.writeFileSync(peerPubPath, publicKeyPem, 'utf8');\n} catch (e) {\n  node.error('write PEM: ' + e.message);\n  return null;\n}\n\nconst sunnyPrivPath = '/etc/mosquitto/certs/sunny-private-key.pem';\nconst outSecretPath = `/etc/mosquitto/certs/${devName}-topic-key-request-secret-key.bin`;\n\nmsg.payload = `openssl pkeyutl -derive -inkey ${sunnyPrivPath} -peerkey ${peerPubPath} -out ${outSecretPath}`;\n\nreturn msg;\n",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 2040,
+        "y": 1760,
+        "wires": [
+            [
+                "9325c97a85a53d2d"
+            ]
+        ]
+    },
+    {
+        "id": "9325c97a85a53d2d",
+        "type": "exec",
+        "z": "a24adc94c330c9a1",
+        "command": "",
+        "addpay": "payload",
+        "append": "",
+        "useSpawn": "false",
+        "timer": "",
+        "winHide": false,
+        "oldrc": false,
+        "name": "Create topic  key request secret key",
+        "x": 2240,
+        "y": 1900,
+        "wires": [
+            [
+                "91ea4a0e2e1c9097"
+            ],
+            [],
+            []
+        ]
+    },
+    {
+        "id": "91ea4a0e2e1c9097",
+        "type": "function",
+        "z": "a24adc94c330c9a1",
+        "name": "decrypt/verify request → query key (WAL)",
+        "func": "const fs = global.get('fs');\nconst crypto = global.get('crypto');\n\nconst encHex     = String(flow.get('enc_keyreq_hex') || '');\nconst ivHex      = String(flow.get('iv_keyreq_hex') || '');\nconst signature  = flow.get('sign');\nconst authStatus = String(flow.get('authentication_status_tk') || 'UNKNOWN');\nconst peerPubKey = flow.get('peer_public_key_pem_tk');\n\n// Sender device name\nconst devName = msg.device_name || 'unknown';\n\nif (!encHex || !ivHex) {\n  node.error('❌ Missing enc/iv');\n  return null;\n}\n\nconst secretPath = `/etc/mosquitto/certs/${devName}-topic-key-request-secret-key.bin`;\nlet secretBin;\ntry {\n  secretBin = fs.readFileSync(secretPath);\n} catch (e) {\n  node.error(`❌ Cannot read secret key ${secretPath}: ${e.message}`);\n  return null;\n}\n\n// Derive AES key from ECDH secret\nconst aesKey = crypto.createHash('sha256').update(secretBin).digest();\n\n// Decrypt request { deviceID, topic_name }\nlet obj;\ntry {\n  const iv = Buffer.from(ivHex, 'hex');\n  const ct = Buffer.from(encHex, 'hex');\n  if (iv.length !== 16) {\n    node.error('❌ Bad IV length for topic-key-request');\n    return null;\n  }\n  const d   = crypto.createDecipheriv('aes-256-cbc', aesKey, iv);\n  const dec = Buffer.concat([d.update(ct), d.final()]).toString('utf8');\n  obj = JSON.parse(dec);\n} catch (e) {\n  node.error('❌ Decrypt/parse topic-key-request: ' + e.message);\n  return null;\n}\n\nconst deviceID   = String(obj.deviceID || obj.device_id || '');\nconst topic_name = String(obj.topic_name || '');\n\nif (!deviceID || !topic_name) {\n  node.error('❌ Missing deviceID/topic_name in decrypted topic-key-request');\n  return null;\n}\n\n// Cache for downstream\nflow.set('deviceID_tk', deviceID);\nflow.set('topic_name_tk', topic_name);\n\n// Verify signature\nlet signature_valid = false;\nif (/^ok$/i.test(authStatus) && peerPubKey && signature) {\n  try {\n    const v = crypto.createVerify('sha256');\n    v.update(`${deviceID}|${topic_name}`);\n    v.end();\n    signature_valid = v.verify(peerPubKey, signature, 'base64');\n  } catch (e) {\n    node.error('verify: ' + e.message);\n    return null;\n  }\n}\n\n// If signature/auth fails → DROP\nif (!signature_valid) {\n  node.warn(`ℹ️ Signature invalid or auth not OK; dropping topic-key-request from ${devName}.`);\n  return null;\n}\n\n// Build SQL query for topic key\nconst dbPath    = '/etc/mosquitto/certs/update_database.db';\nconst pragmaKey = env.get('DB_PASSWORD');\nconst safeTopic = topic_name.replace(/'/g, \"''\");\n\nconst sql = `\nPRAGMA key='${pragmaKey}';\nPRAGMA journal_mode=WAL;\nPRAGMA busy_timeout=5000;\n.headers off\n.mode list\n.separator |\nSELECT hex(key_blob) FROM topic_keys WHERE topic_name='${safeTopic}';\n`;\n\nmsg.payload = `sqlcipher ${dbPath} <<< \"${sql.trim()}\"`;\n\nreturn msg;\n",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 2400,
+        "y": 1820,
+        "wires": [
+            [
+                "f333437b564b179d"
+            ]
+        ]
+    },
+    {
+        "id": "f333437b564b179d",
+        "type": "exec",
+        "z": "a24adc94c330c9a1",
+        "command": "",
+        "addpay": "payload",
+        "append": "",
+        "useSpawn": "false",
+        "timer": "",
+        "winHide": false,
+        "oldrc": false,
+        "name": "Select topic key (WAL)",
+        "x": 2700,
+        "y": 1820,
+        "wires": [
+            [
+                "12b068328f6df9b9"
+            ],
+            [],
+            []
+        ]
+    },
+    {
+        "id": "12b068328f6df9b9",
+        "type": "function",
+        "z": "a24adc94c330c9a1",
+        "name": "Prepare to send topic key for subscriber (validate 32B)",
+        "func": "// Build encrypted key_resp ONLY if key decodes to 32 bytes\nconst fs     = global.get('fs');\nconst crypto = global.get('crypto');\n\nconst deviceID   = flow.get('deviceID_tk')  || \"\";\nconst topicName  = flow.get('topic_name_tk')|| \"\";\nconst devicename = msg.device_name;\n\nif (!topicName) {\n  node.warn('ℹ️ No topic_name_tk in flow; cannot send key.');\n  return null;\n}\n\n// 1) Normalise payload to text and extract the LAST non-empty line\nlet text;\nif (Buffer.isBuffer(msg.payload)) {\n  text = msg.payload.toString('utf8');\n} else {\n  text = String(msg.payload ?? '');\n}\n\nconst lines = text\n  .split(/\\r?\\n/)\n  .map(s => s.trim())\n  .filter(Boolean);\n\nif (!lines.length) {\n  node.warn(`⛔ No lines in topic_keys query output for \"${topicName}\"`);\n  return null;\n}\n\nconst last = lines[lines.length - 1];  // expected hex(key_blob)\n\nlet keyBuf;\nif (/^[0-9A-Fa-f]+$/.test(last) && last.length % 2 === 0) {\n  keyBuf = Buffer.from(last, 'hex');\n} else {\n  node.warn(`⛔ Last line is not valid hex for \"${topicName}\": \"${last}\"`);\n  return null;\n}\n\n// validate exact 32B after decode\nif (keyBuf.length !== 32) {\n  node.warn(`⛔ Drop respond: topic key length ${keyBuf.length}B for \"${topicName}\"`);\n  return null;\n}\n\n// Base64 form we include in JSON\nconst keyBlobB64 = keyBuf.toString('base64');\n\n// 2) Re-derive AES key from topic-key-request secret for this subscriber\nconst secretPath = `/etc/mosquitto/certs/${devicename}-topic-key-request-secret-key.bin`;\nlet secretBin;\ntry {\n  secretBin = fs.readFileSync(secretPath);\n} catch (e) {\n  node.error(`❌ Cannot read secret key ${secretPath}: ${e.message}`);\n  return null;\n}\nconst aesKey = crypto.createHash('sha256').update(secretBin).digest();\n\n// 3) Build plaintext respond object\nconst status     = 'OK';\nconst respondObj = { status, topic_name: topicName, key_blob_b64: keyBlobB64 };\n\n// Encrypt respond object with AES-256-CBC\nconst iv = crypto.randomBytes(16);\nlet encryptedHex;\ntry {\n  const c = crypto.createCipheriv('aes-256-cbc', aesKey, iv);\n  encryptedHex = c.update(JSON.stringify(respondObj), 'utf8', 'hex');\n  encryptedHex += c.final('hex');\n} catch (e) {\n  node.error('❌ Encrypt respond: ' + e.message);\n  return null;\n}\n\n// 4) Sign canonical string with Sunny private key\nconst sunnyPriv = global.get('private_key', 'file');\nif (!sunnyPriv) {\n  node.error('❌ Missing Sunny private key in global(file) context');\n  return null;\n}\n\nconst canonical = `${status}|${topicName}|${keyBlobB64}`;\nconst signer    = crypto.createSign('sha256');\nsigner.update(canonical);\nsigner.end();\nconst signature = signer.sign(sunnyPriv, 'base64');\n\n// 5) Final MQTT message\nmsg.topic = `topic/key_resp/${devicename}`;\nmsg.payload = {\n  encryptedData: encryptedHex,\n  iv:           iv.toString('hex'),\n  signature\n};\n\nnode.warn(`📤 Encrypt / topic-key request respond for \"${topicName}\" → ${devicename}`);\nreturn msg;\n",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 2940,
+        "y": 1900,
+        "wires": [
+            [
+                "20210bc33fb396a6"
+            ]
+        ]
+    },
+    {
+        "id": "20210bc33fb396a6",
+        "type": "mqtt out",
+        "z": "a24adc94c330c9a1",
+        "name": "Send requested topic key",
+        "topic": "",
+        "qos": "0",
+        "retain": "",
+        "respTopic": "",
+        "contentType": "",
+        "userProps": "",
+        "correl": "",
+        "expiry": "",
+        "broker": "7c21cdd37769f825",
+        "x": 3230,
+        "y": 1780,
+        "wires": []
+    },
+    {
+        "id": "1bc201542cb879eb",
+        "type": "mqtt in",
+        "z": "a24adc94c330c9a1",
+        "name": "Topic registration request",
+        "topic": "topic/register/+",
+        "qos": "0",
+        "datatype": "auto-detect",
+        "broker": "d9e12a3558e15ca7",
+        "nl": false,
+        "rap": true,
+        "rh": 0,
+        "inputs": 0,
+        "x": 1410,
+        "y": 1460,
+        "wires": [
+            [
+                "cd84f94b0125ab75"
+            ]
+        ]
+    },
+    {
+        "id": "cd84f94b0125ab75",
+        "type": "function",
+        "z": "a24adc94c330c9a1",
+        "name": "Save MQTT payload in flow and auery out public Key ",
+        "func": "// --- Step 1: Extract device name from MQTT topic ---\nlet topicParts = String(msg.topic||\"\").split(\"/\");\nmsg.device_name = topicParts[2] || \"\";\n\n// --- Step 2: Extract values from MQTT payload (encrypted format) ---\nconst p = msg.payload || {};\nconst encHex    = String(p.encryptedData || \"\").trim();\nconst ivHex     = String(p.iv || \"\").trim();\nconst signature = String(p.signature || \"\").trim();\nconst deviceID  = String(p.device_id || \"\").trim();\nconst wifi_ssid = String(p.wifi_ssid || \"\").trim();\n\nif (!encHex || !ivHex || !signature || !deviceID) {\n  node.error(\"❌ Missing required payload values: encryptedData, iv, signature, or device_id.\");\n  return null;\n}\n\n// --- NEW: Lightweight de-dup for replay / resend protection ---\n// Key = deviceID|signature|first16(encHex)|t_pub (if provided)\nconst tPub = (p.t_pub !== undefined && p.t_pub !== null) ? String(p.t_pub) : \"\";\nconst dedupKey = `${deviceID}|${signature}|${encHex.slice(0,16)}|${tPub}`;\nconst now = Date.now();\nconst TTL_MS = 5 * 60 * 1000;   // keep entries for 5 minutes\nconst MAX_KEYS = 1000;          // simple LRU cap\nlet cache = flow.get('kms_reg_dedup') || {};\n\n// purge expired + trim to MAX_KEYS (LRU-ish)\nconst keys = Object.keys(cache);\nif (keys.length) {\n  for (const k of keys) {\n    if ((now - (cache[k]||0)) > TTL_MS) delete cache[k];\n  }\n}\nconst keys2 = Object.keys(cache);\nif (keys2.length > MAX_KEYS) {\n  keys2.sort((a,b)=>cache[a]-cache[b]);\n  for (let i=0;i<keys2.length-MAX_KEYS;i++) delete cache[keys2[i]];\n}\n\nif (cache[dedupKey]) {\n  node.warn(`🛑 Duplicate topic-registration request dropped (key=${dedupKey})`);\n  flow.set('kms_reg_dedup', cache);\n  return null; // stop here for duplicates\n}\ncache[dedupKey] = now;\nflow.set('kms_reg_dedup', cache);\n\n// Cache crypto envelope for next steps\nflow.set(\"deviceID\", deviceID);\nflow.set(\"signature\", signature);\nflow.set(\"wifi_ssid\", wifi_ssid);\nflow.set(\"encryptedData\", encHex);\nflow.set(\"ivHex\", ivHex);\n\n// --- Cache baseline meta from Alice for KMS / E2E timing ---\nconst meta = {\n  t_pub: Number(p.t_pub),\n  run_id: String(p.run_id || ''),\n  run_tag: String(p.run_tag || ''),\n  mode: p.mode,\n  path_class: p.path_class,\n  mqtt_version: p.mqtt_version,\n  qos: p.qos,\n  rate_mps: p.rate_mps,\n  msg_count: Number(p.msg_count || 0),\n  duration: Number(p.duration || 0),\n  kms_control: p.kms_control\n};\nflow.set('kms_meta', meta);\n\n// queue t_pub per run for request→respond pairing\nconst runKey = String(meta.run_id || meta.run_tag || 'default');\nconst qKey = `kms_q_${runKey}`;\nlet q = flow.get(qKey) || [];\nif (Number.isFinite(meta.t_pub)) {\n  q.push(meta.t_pub);\n  flow.set(qKey, q);\n}\nif (meta.kms_control === 'done') {\n  flow.set(`kms_done_${runKey}`, true);\n}\n\n// --- Step 4: Prepare SQLCipher queries (with WAL + busy timeout) ---\nconst dbPath = \"/etc/mosquitto/certs/update_database.db\";\nconst pragmaKey = env.get(\"DB_PASSWORD\");\nconst safeDeviceID = deviceID.replace(/'/g, \"''\");\n\nconst sql = `\nPRAGMA key='${pragmaKey}';\nPRAGMA journal_mode=WAL;\nPRAGMA busy_timeout=5000;\n\n.timeout 5000\n.headers off\n.mode list\n.separator |\n\n-- (1) authentication_status\nSELECT authentication_status FROM DeviceProfile WHERE device_id='${safeDeviceID}';\n-- (2) public_key\nSELECT public_key FROM Keys WHERE device_id='${safeDeviceID}';\n`;\n\nmsg.payload = `sqlcipher ${dbPath} <<< \"${sql.trim()}\"`;\nreturn msg;\n",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 1460,
+        "y": 1560,
+        "wires": [
+            [
+                "a010da80f5b5862d"
+            ]
+        ]
+    },
+    {
+        "id": "a010da80f5b5862d",
+        "type": "exec",
+        "z": "a24adc94c330c9a1",
+        "command": "",
+        "addpay": "payload",
+        "append": "",
+        "useSpawn": "false",
+        "timer": "",
+        "winHide": false,
+        "oldrc": false,
+        "name": "Select public key",
+        "x": 1730,
+        "y": 1480,
+        "wires": [
+            [
+                "a6b12f1e9aa04455"
+            ],
+            [],
+            []
+        ]
+    },
+    {
+        "id": "b1304032191d27af",
+        "type": "function",
+        "z": "a24adc94c330c9a1",
+        "name": "decrypt/verify the registration request and query out topic key",
+        "func": "const fs = global.get('fs');\nconst crypto = global.get('crypto');\n\nconst encHex = String(flow.get('encryptedData') || '');\nconst ivHex = String(flow.get('ivHex') || '');\nconst signature = flow.get('signature');\nconst authStatus = String(flow.get('authentication_status') || 'UNKNOWN');\nconst peerPubKey = flow.get('peer_public_key_pem');\n\n// prefer msg.device_name, fallback to flow, then 'unknown'\nconst devName = msg.device_name || flow.get('device_name') || 'unknown';\nflow.set('device_name', devName);\n\nif (!encHex || !ivHex) {\n  node.error('❌ Missing enc_req_hex or enc_iv_hex in flow');\n  return null;\n}\n\nconst secretPath = `/etc/mosquitto/certs/${devName}-topic-registration-secret-key.bin`;\nlet secretBin;\ntry {\n  secretBin = fs.readFileSync(secretPath);\n} catch (e) {\n  node.error(`❌ Cannot read secret key: ${secretPath} → ${e.message}`);\n  return null;\n}\nconst aesKey = crypto.createHash('sha256').update(secretBin).digest();\n\nlet decrypted, obj;\ntry {\n  const iv = Buffer.from(ivHex, 'hex');\n  const ct = Buffer.from(encHex, 'hex');\n  if (iv.length !== 16) {\n    node.error(`❌ Invalid IV length: ${iv.length}`);\n    return null;\n  }\n  const decipher = crypto.createDecipheriv('aes-256-cbc', aesKey, iv);\n  decrypted = Buffer.concat([decipher.update(ct), decipher.final()]).toString('utf8');\n  obj = JSON.parse(decrypted);\n} catch (e) {\n  node.error('❌ Decryption failed: ' + e.message);\n  return null;\n}\n\nconst deviceID = String(obj.deviceID || obj.device_id || '');\nconst topic_name = String(obj.topic_name || '');\nif (!deviceID || !topic_name) {\n  node.error('❌ Decrypted payload missing deviceID or topic_name');\n  return null;\n}\nflow.set('deviceID', deviceID);\nflow.set('topic_name', topic_name);\n\nconst dataToVerify = `${deviceID}|${topic_name}`;\nflow.set('dataToVerify', dataToVerify);\n\nlet signature_valid = false;\nif (/^ok$/i.test(authStatus)) {\n  if (peerPubKey && signature) {\n    try {\n      const verifier = crypto.createVerify('sha256');\n      verifier.update(dataToVerify);\n      verifier.end();\n      signature_valid = verifier.verify(peerPubKey, signature, 'base64');\n      node.warn(\n        signature_valid\n          ? `✅ Signature OK for \"${dataToVerify}\" from ${devName}`\n          : `❌ Signature FAILED for \"${dataToVerify}\" from ${devName}`\n      );\n    } catch (e) {\n      node.error('Signature verification error: ' + e.message);\n      return null;\n    }\n  }\n}\n\n// --- DROP COMPLETELY WHEN SIGNATURE OR AUTH FAIL ---\nif (!signature_valid) {\n  node.warn(`ℹ️ Signature invalid or auth not OK; dropping topic-registration-request from ${devName}.`);\n  return null;   // nothing goes to Exec → no key generation, no response\n}\n\n// Only if signature_valid === true → query topic_keys\nconst dbPath = \"/etc/mosquitto/certs/update_database.db\";\nconst pragmaKey = env.get(\"DB_PASSWORD\");\nconst safeTopic = topic_name.replace(/'/g, \"''\");\n\nconst sql2 = `\nPRAGMA key='${pragmaKey}';\nPRAGMA journal_mode=WAL;\nPRAGMA busy_timeout=5000;\n\n.headers off\n.mode list\n.separator |\n.timeout 5000\n\nSELECT created_key FROM topic_keys WHERE topic_name='${safeTopic}';\n`.trim();\n\nmsg.payload = `sqlcipher ${dbPath} <<< \"${sql2}\"`;\nreturn msg;\n",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 2420,
+        "y": 1580,
+        "wires": [
+            [
+                "8b64aca7d47214bb"
+            ]
+        ]
+    },
+    {
+        "id": "8b64aca7d47214bb",
+        "type": "exec",
+        "z": "a24adc94c330c9a1",
+        "command": "",
+        "addpay": "payload",
+        "append": "",
+        "useSpawn": "false",
+        "timer": "",
+        "winHide": false,
+        "oldrc": false,
+        "name": "Select topic key",
+        "x": 2360,
+        "y": 1480,
+        "wires": [
+            [
+                "78dd1650a1bf0c4b"
+            ],
+            [],
+            []
+        ]
+    },
+    {
+        "id": "ae33a242b84d426b",
+        "type": "exec",
+        "z": "a24adc94c330c9a1",
+        "command": "",
+        "addpay": "payload",
+        "append": "",
+        "useSpawn": "false",
+        "timer": "",
+        "winHide": false,
+        "oldrc": false,
+        "name": "Create topic key",
+        "x": 2780,
+        "y": 1560,
+        "wires": [
+            [
+                "3e367de7fb48fe63"
+            ],
+            [],
+            []
+        ]
+    },
+    {
+        "id": "78dd1650a1bf0c4b",
+        "type": "function",
+        "z": "a24adc94c330c9a1",
+        "name": "Validate Topic Key and create key",
+        "func": "const topicName = flow.get('topic_name') || \"\";\nconst safeFile  = topicName.replace(/[^\\w.-]/g, \"_\") + \".key\";\nconst outPath   = `/etc/mosquitto/certs/${safeFile}`;\n\nfunction genNewKey(reason, extra = {}) {\n  msg.should_upsert = true;\n  msg.payload = `openssl rand -out ${outPath} 32`;\n  msg.reason  = reason;\n  Object.assign(msg, extra);\n\n  node.warn(`🔑 Generating NEW topic key for \"${topicName}\" (reason=${reason})`);\n  return msg;\n}\n\n// Raw output from \"Select topic key\" Exec\nconst out = String(msg.payload ?? \"\").trim();\nif (!out) {\n  return genNewKey(\"empty_output\");\n}\n\n// Split into lines, trim, drop empties\nconst lines = out\n  .split(/\\r?\\n/)\n  .map(s => s.trim())\n  .filter(s => s.length);\n\n// If any line says \"0 rows\", treat as no record\nif (lines.some(l => /0\\s+rows?/i.test(l))) {\n  return genNewKey(\"no_record\", { raw: out.slice(0, 100) });\n}\n\n// Find the LAST purely numeric token → created_key\nlet createdKey = NaN;\nfor (let i = lines.length - 1; i >= 0; i--) {\n  const m = lines[i].match(/^\\d+$/);\n  if (m) {\n    createdKey = parseInt(m[0], 10);\n    break;\n  }\n}\n\nif (Number.isNaN(createdKey)) {\n  node.warn(`⚠️ Cannot parse created_key from Exec output: \"${out.slice(0, 100)}\"`);\n  return genNewKey(\"parse_failed\", { raw: out.slice(0, 200) });\n}\n\n// Age check: 15 minutes (900 s) window\nconst now = Math.floor(Date.now() / 1000);\nconst age = now - createdKey;\n\nif (age > 900) {\n  return genNewKey(\"expired_key\", { created_key: createdKey, age_seconds: age });\n}\n\nnode.warn(`ℹ️ Reusing existing key for topic \"${topicName}\" (age=${age}s, created=${createdKey})`);\nmsg.should_upsert = false;\nmsg.payload = \"true\";\nreturn msg;\n",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 2680,
+        "y": 1480,
+        "wires": [
+            [
+                "ae33a242b84d426b"
+            ]
+        ]
+    },
+    {
+        "id": "3e367de7fb48fe63",
+        "type": "function",
+        "z": "a24adc94c330c9a1",
+        "name": "Prepare to insert topic Key",
+        "func": "// Function — Prepare to insert topic Key (WAL + busy_timeout + txn)\n\nconst fs = global.get('fs');\n\nconst dbPath    = \"/etc/mosquitto/certs/update_database.db\";\nconst pragmaKey = env.get(\"DB_PASSWORD\");\n\nconst topicName = flow.get('topic_name') || \"\";\nif (!topicName) {\n  node.error(\"❌ Missing topic_name in flow context.\");\n  return null;\n}\n\nconst safeTopic = topicName.replace(/'/g, \"''\");\nconst safeFile  = topicName.replace(/[^\\w.-]/g, \"_\") + \".key\";\nconst keyPath   = `/etc/mosquitto/certs/${safeFile}`;\n\n// If a fresh key is already valid, still forward harmlessly to keep flow moving.\nif (msg.should_upsert !== true) {\n  //node.warn(\"⏭️ Skipping UPSERT: fresh key reused — forwarding to Exec anyway.\");\n  msg.payload = \"true\";\n  return msg;\n}\n\n// Read key file → hex\nif (!fs.existsSync(keyPath)) {\n  node.error(`❌ Key file not found: ${keyPath}`);\n  return null;\n}\nconst buf = fs.readFileSync(keyPath);\nif (!buf || !buf.length) {\n  node.error(`❌ Key file is empty: ${keyPath}`);\n  return null;\n}\nconst hex = buf.toString('hex');\nconst createdKey = Math.floor(Date.now() / 1000);\n\n// Cache base64 for later use\nflow.set('key_blob_b64', buf.toString('base64'));\n\n// SQLCipher command with WAL + busy timeout + one transaction\nconst sql = `\nPRAGMA key='${pragmaKey}';\nPRAGMA journal_mode=WAL;          -- readers don’t block writers\nPRAGMA busy_timeout=5000;         -- wait up to 5s instead of 'database is locked'\nPRAGMA synchronous=NORMAL;        -- faster, safe for WAL\n\n.timeout 5000\n\nBEGIN IMMEDIATE;                  -- grab write lock up-front (lets others wait)\nUPDATE topic_keys\nSET\n  key_blob    = X'${hex}',\n  created_key = ${createdKey}\nWHERE topic_name = '${safeTopic}';\n\nINSERT INTO topic_keys (topic_name, key_blob, created_key)\nSELECT '${safeTopic}', X'${hex}', ${createdKey}\nWHERE NOT EXISTS (\n  SELECT 1 FROM topic_keys WHERE topic_name = '${safeTopic}'\n);\nCOMMIT;\n`.trim();\n\nmsg.payload = `sqlcipher ${dbPath} <<< \"${sql}\"`;\nreturn msg;\n",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 3060,
+        "y": 1480,
+        "wires": [
+            [
+                "e97495feb738b3a7"
+            ]
+        ]
+    },
+    {
+        "id": "e97495feb738b3a7",
+        "type": "exec",
+        "z": "a24adc94c330c9a1",
+        "command": "",
+        "addpay": "payload",
+        "append": "",
+        "useSpawn": "false",
+        "timer": "",
+        "winHide": false,
+        "oldrc": false,
+        "name": "Insert topic keys",
+        "x": 3020,
+        "y": 1560,
+        "wires": [
+            [
+                "0853bb2c0803a441"
+            ],
+            [],
+            []
+        ]
+    },
+    {
+        "id": "0853bb2c0803a441",
+        "type": "function",
+        "z": "a24adc94c330c9a1",
+        "name": "Prepare to select topic key",
+        "func": "// Select topic key with WAL + busy timeout, stable HEX output\n\nconst dbPath    = \"/etc/mosquitto/certs/update_database.db\";\nconst pragmaKey = env.get(\"DB_PASSWORD\");\n\nconst topicName = flow.get('topic_name') || \"\";\nif (!topicName) {\n  node.error(\"❌ Missing topic_name in flow.\");\n  return null;\n}\n\nconst safeTopic = String(topicName).replace(/'/g, \"''\");\n\nconst sql = `\nPRAGMA key='${pragmaKey}';\nPRAGMA journal_mode=WAL;\nPRAGMA busy_timeout=5000;\n\n.headers off\n.mode list\n.separator |\n.timeout 5000\n\n-- Return HEX so downstream can robustly parse → base64\nSELECT lower(hex(key_blob)) FROM topic_keys WHERE topic_name='${safeTopic}';\n`.trim();\n\nmsg.payload = `sqlcipher ${dbPath} <<< \"${sql}\"`;\nreturn msg;\n",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 3300,
+        "y": 1600,
+        "wires": [
+            [
+                "4be0c7c41056619d"
+            ]
+        ]
+    },
+    {
+        "id": "4be0c7c41056619d",
+        "type": "exec",
+        "z": "a24adc94c330c9a1",
+        "command": "",
+        "addpay": "payload",
+        "append": "",
+        "useSpawn": "false",
+        "timer": "",
+        "winHide": false,
+        "oldrc": false,
+        "name": "Select from topic keys",
+        "x": 3420,
+        "y": 1420,
+        "wires": [
+            [
+                "eba398c04eb236c2"
+            ],
+            [],
+            []
+        ]
+    },
+    {
+        "id": "251f471b4a6204cc",
+        "type": "mqtt out",
+        "z": "a24adc94c330c9a1",
+        "name": "Send topic key",
+        "topic": "",
+        "qos": "0",
+        "retain": "",
+        "respTopic": "",
+        "contentType": "",
+        "userProps": "",
+        "correl": "",
+        "expiry": "",
+        "broker": "7c21cdd37769f825",
+        "x": 3920,
+        "y": 1460,
+        "wires": []
+    },
+    {
+        "id": "a6b12f1e9aa04455",
+        "type": "function",
+        "z": "a24adc94c330c9a1",
+        "name": "Prepare to create topic registration secret key",
+        "func": "const fs = global.get('fs');\n\nconst out = String(msg.payload || \"\");\nconst pemMatch = out.match(/-----BEGIN PUBLIC KEY-----[\\s\\S]*?-----END PUBLIC KEY-----/);\n\nif (!pemMatch) {\n  node.error(\"❌ No public key (PEM) found in Exec output.\");\n  return null;\n}\n\nconst publicKeyPem = pemMatch[0].trim();\n\n// ---- Extract proper authentication_status (last non-empty line before PEM) ----\nlet authentication_status = \"UNKNOWN\";\nconst beforePem = out.slice(0, pemMatch.index).trim();\n\n// Split all lines before the PEM, trim, drop empties\nconst lines = beforePem\n  .split(/\\r?\\n/)\n  .map(s => s.trim())\n  .filter(s => s.length);\n\n// Take the LAST non-empty line (this should be the SELECT result, e.g. \"OK\")\nif (lines.length) {\n  authentication_status = lines[lines.length - 1] || \"UNKNOWN\";\n}\n\nflow.set(\"peer_public_key_pem\", publicKeyPem);\nflow.set(\"authentication_status\", authentication_status);\n\nconst devName = msg.device_name || \"unknown\";\nconst peerPubPath = `/etc/mosquitto/certs/${devName}-public-key.pem`;\n\ntry {\n  fs.writeFileSync(peerPubPath, publicKeyPem, \"utf8\");\n} catch (e) {\n  node.error(\"❌ Failed to write public key file: \" + e.message);\n  return null;\n}\n\nconst sunnyPrivPath  = \"/etc/mosquitto/certs/sunny-private-key.pem\";\nconst outSecretPath  = `/etc/mosquitto/certs/${devName}-topic-registration-secret-key.bin`;\n\nmsg.payload = `openssl pkeyutl -derive -inkey ${sunnyPrivPath} -peerkey ${peerPubPath} -out ${outSecretPath}`;\nreturn msg;\n",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 1930,
+        "y": 1560,
+        "wires": [
+            [
+                "371566166af27bd6"
+            ]
+        ]
+    },
+    {
+        "id": "371566166af27bd6",
+        "type": "exec",
+        "z": "a24adc94c330c9a1",
+        "command": "",
+        "addpay": "payload",
+        "append": "",
+        "useSpawn": "false",
+        "timer": "",
+        "winHide": false,
+        "oldrc": false,
+        "name": "Create topic registration secret key",
+        "x": 2040,
+        "y": 1480,
+        "wires": [
+            [
+                "b1304032191d27af"
+            ],
+            [],
+            []
+        ]
+    },
+    {
+        "id": "a3a7e40033a896ad",
+        "type": "function",
+        "z": "a24adc94c330c9a1",
+        "name": "KMS Parse + Latency → perf & summary (+2 cmds, 4 out)",
+        "func": "// KMS Parse + Latency → perf & summary (+2 cmds, 4 out)\n\nfunction fmt(ms) {\n  if (!Number.isFinite(ms)) return \"\";\n  const d = new Date(ms);\n  const p = n => String(n).padStart(2, \"0\");\n  const ms3 = String(d.getMilliseconds()).padStart(3, \"0\");\n  return (\n    `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ` +\n    `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}.${ms3}`\n  );\n}\n\nfunction csv(arr) {\n  return arr.map(v => (v === undefined ? \"\" : v)).join(\",\");\n}\n\nconst fs = global.get(\"fs\");\n\n// === 0) Meta + per-run keys ===\nconst meta   = flow.get(\"kms_meta\") || {};\nconst topic  = String(flow.get(\"topic_name\") || \"\");\nconst runKey = String(meta.run_id || meta.run_tag || \"default\");\n\nconst qKey      = `kms_q_${runKey}`;     // queue of t_pub for this run\nconst aKey      = `kms_lat_${runKey}`;   // collected latencies for this run\nconst monKey    = `kms_mon_${runKey}`;   // whether monitors started\nconst perfHdrKey = \"kms_perf_hdr_v3\";\nconst sumHdrKey  = \"kms_sum_hdr_v3\";\n\nconst perfPath = \"/etc/mosquitto/perf_results/kms_perf.csv\";\nconst sumPath  = \"/etc/mosquitto/perf_results/kms_summary_latency.csv\";\n\n// Duration (seconds) for this run: from meta, fallback 120\nconst DURATION_SEC = Number(meta.duration || 120) || 120;\n\nconst now = Date.now();\n\n// === 1) Pop one t_pub and compute latency for this response ===\nlet q = flow.get(qKey) || [];\nconst t_pub = q.length ? q.shift() : undefined; // oldest\nflow.set(qKey, q);\nconst remaining = q.length;\n\nconst t_recv = now;\nconst latMs  = Number.isFinite(t_pub) ? t_recv - t_pub : NaN;\n\nif (Number.isFinite(latMs)) {\n  let arr = flow.get(aKey) || [];\n  arr.push(latMs);\n  flow.set(aKey, arr);\n}\n\n// === 2) Per-message row → kms_perf.csv ===\n// Added run_tag column after run_id\nconst perfHeader = csv([\n  \"ts_human\",\n  \"mode\",\n  \"path_class\",\n  \"mqtt_version\",\n  \"qos\",\n  \"rate_mps\",\n  \"run_id\",\n  \"run_tag\",\n  \"topic\",\n  \"t_pub_human\",\n  \"t_recv_human\",\n  \"latency_ms\",\n  \"latency_s\",\n  \"status\"\n]);\n\nconst perfRow = csv([\n  fmt(now),\n  meta.mode,\n  meta.path_class,\n  meta.mqtt_version,\n  meta.qos,\n  meta.rate_mps,\n  meta.run_id || \"\",\n  meta.run_tag || \"\",\n  topic,\n  fmt(t_pub),\n  fmt(t_recv),\n  Number.isFinite(latMs) ? latMs : \"\",\n  Number.isFinite(latMs) ? (latMs / 1000).toFixed(3) : \"\",\n  \"OK\"\n]);\n\nconst out1 = [];\nconst perfHdrWritten = !!flow.get(perfHdrKey);\nconst perfFileMissing =\n  !fs || !fs.existsSync ? !perfHdrWritten : !fs.existsSync(perfPath);\n\nif (!perfHdrWritten || perfFileMissing) {\n  out1.push({ payload: perfHeader, filename: perfPath });\n  flow.set(perfHdrKey, true);\n}\nout1.push({ payload: perfRow, filename: perfPath });\n\n// === 3) Start monitors once per run (first response) ===\nconst cmdOut3 = [];\nconst cmdOut4 = [];\nif (!flow.get(monKey)) {\n  const script  = \"/etc/mosquitto/perf_results/monitor_sys_stats.sh\";\n  const runTag  = String(meta.run_tag || \"run\");\n  const qosArg  = String(meta.qos ?? \"\");\n  const mqttArg = String(meta.mqtt_version ?? \"\");\n  const durArg  = String(DURATION_SEC);\n\n  cmdOut3.push({\n    payload: `${script} ${runTag} mosquitto ${qosArg} ${mqttArg} ${durArg}`\n  });\n  cmdOut4.push({\n    payload: `${script} ${runTag} node-red ${qosArg} ${mqttArg} ${durArg}`\n  });\n  flow.set(monKey, true);\n}\n\n// === 4) Summary row → kms_summary_latency.csv ===\n// Includes expected_count + estimated_drop_count + estimated_drop_pct\nconst doneFlag = !!flow.get(`kms_done_${runKey}`);\nlet out2 = [];\n\nif (doneFlag) {\n  const arrRaw = flow.get(aKey) || [];\n\n  if (arrRaw.length > 0) {\n    const observedCount = arrRaw.length;\n\n    const rateMps      = Number(meta.rate_mps || 0);\n    const msgCountMeta = Number(meta.msg_count || 0);\n\n    let expectedCount;\n    if (Number.isFinite(msgCountMeta) && msgCountMeta > 0) {\n      expectedCount = Math.round(msgCountMeta);\n    } else if (Number.isFinite(rateMps) && rateMps > 0) {\n      expectedCount = Math.round(rateMps * DURATION_SEC);\n    } else {\n      expectedCount = observedCount;\n    }\n\n    if (expectedCount < observedCount) {\n      expectedCount = observedCount;\n    }\n\n    let estimatedDropCount = expectedCount - observedCount;\n    if (estimatedDropCount < 0) estimatedDropCount = 0;\n\n    const estimatedDropPct =\n      expectedCount > 0 ? (estimatedDropCount / expectedCount) * 100 : 0;\n\n    const coverage =\n      expectedCount > 0 ? observedCount / expectedCount : 1;\n\n    node.warn(\n      `KMS summary for run \"${runKey}\": ` +\n        `got ${observedCount} samples (expected≈${expectedCount}, ` +\n        `coverage ${(coverage * 100).toFixed(1)}%, ` +\n        `estimated_drop≈${estimatedDropCount} ` +\n        `(${estimatedDropPct.toFixed(1)}%), queue_remaining=${remaining})`\n    );\n\n    const arr = arrRaw.slice().sort((a, b) => a - b);\n    const pick = p =>\n      arr[Math.min(arr.length - 1, Math.floor(p * (arr.length - 1)))];\n    const median = pick(0.5);\n    const p95    = pick(0.95);\n    const p99    = pick(0.99);\n\n    // Added run_tag column after run_id\n    const sumHeader = csv([\n      \"ts_human\",\n      \"mode\",\n      \"path_class\",\n      \"mqtt_version\",\n      \"qos\",\n      \"rate_mps\",\n      \"run_id\",\n      \"run_tag\",\n      \"count\",\n      \"expected_count\",\n      \"estimated_drop_count\",\n      \"estimated_drop_pct\",\n      \"median_ms\",\n      \"p95_ms\",\n      \"p99_ms\",\n      \"median_s\",\n      \"p95_s\",\n      \"p99_s\"\n    ]);\n\n    const sumRow = csv([\n      fmt(Date.now()),\n      meta.mode,\n      meta.path_class,\n      meta.mqtt_version,\n      meta.qos,\n      meta.rate_mps,\n      meta.run_id || \"default\",\n      meta.run_tag || \"\",\n      observedCount,\n      expectedCount,\n      estimatedDropCount,\n      estimatedDropPct.toFixed(1),\n      median,\n      p95,\n      p99,\n      (median / 1000).toFixed(3),\n      (p95 / 1000).toFixed(3),\n      (p99 / 1000).toFixed(3)\n    ]);\n\n    const sumHdrWritten = !!flow.get(sumHdrKey);\n    const sumFileMissing =\n      !fs || !fs.existsSync ? !sumHdrWritten : !fs.existsSync(sumPath);\n\n    if (!sumHdrWritten || sumFileMissing) {\n      out2.push({ payload: sumHeader, filename: sumPath });\n      flow.set(sumHdrKey, true);\n    }\n    out2.push({ payload: sumRow, filename: sumPath });\n  }\n\n  // Reset per-run state for next test\n  flow.set(aKey, []);\n  flow.set(`kms_done_${runKey}`, false);\n  flow.set(monKey, false);\n}\n\nreturn [out1, out2, cmdOut3, cmdOut4];\n",
+        "outputs": 4,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 3810,
+        "y": 1560,
+        "wires": [
+            [
+                "afb42262c1ad674c"
+            ],
+            [
+                "43dfa9bd022f8643"
+            ],
+            [
+                "c2515c65e3539323"
+            ],
+            [
+                "d82a2d31fc0bb2bc"
+            ]
+        ]
+    },
+    {
+        "id": "afb42262c1ad674c",
+        "type": "file",
+        "z": "a24adc94c330c9a1",
+        "name": "CSV: kms_perf.csv (via msg.filename)",
+        "filename": "filename",
+        "filenameType": "msg",
+        "appendNewline": true,
+        "createDir": true,
+        "overwriteFile": "false",
+        "encoding": "none",
+        "x": 4230,
+        "y": 1480,
+        "wires": [
+            []
+        ]
+    },
+    {
+        "id": "43dfa9bd022f8643",
+        "type": "file",
+        "z": "a24adc94c330c9a1",
+        "name": "CSV: kms_summary_latency.csv (via msg.filename)",
+        "filename": "filename",
+        "filenameType": "msg",
+        "appendNewline": true,
+        "createDir": true,
+        "overwriteFile": "false",
+        "encoding": "none",
+        "x": 4270,
+        "y": 1540,
+        "wires": [
+            []
+        ]
+    },
+    {
+        "id": "c2515c65e3539323",
+        "type": "exec",
+        "z": "a24adc94c330c9a1",
+        "command": "",
+        "addpay": true,
+        "append": "",
+        "useSpawn": "false",
+        "timer": "",
+        "winHide": false,
+        "oldrc": false,
+        "name": "Exec: start monitor (mosquitto)",
+        "x": 4250,
+        "y": 1600,
+        "wires": [
+            [],
+            [],
+            []
+        ]
+    },
+    {
+        "id": "d82a2d31fc0bb2bc",
+        "type": "exec",
+        "z": "a24adc94c330c9a1",
+        "command": "",
+        "addpay": true,
+        "append": "",
+        "useSpawn": "false",
+        "timer": "",
+        "winHide": false,
+        "oldrc": false,
+        "name": "Exec: start monitor (node-red)",
+        "x": 4230,
+        "y": 1680,
+        "wires": [
+            [],
+            [],
+            []
+        ]
+    },
+    {
+        "id": "eba398c04eb236c2",
+        "type": "function",
+        "z": "a24adc94c330c9a1",
+        "name": "Prepare to send topic key for publshier",
+        "func": "// Prepare to send topic key for publisher — robust WAL output parsing + include run meta\n\nconst fs = global.get('fs');\nconst crypto = global.get('crypto');\n\nconst topicName  = flow.get('topic_name') || \"\";\nconst devicename = msg.device_name || \"unknown\";\n\n// ---------- 0) Pull run/testing meta cached from the request ----------\nconst meta = flow.get('kms_meta') || {};\nconst metaOut = {\n  run_id:      String(meta.run_id || ''),\n  run_tag:     String(meta.run_tag || ''),\n  mode:        meta.mode,\n  path_class:  meta.path_class,\n  mqtt_version: meta.mqtt_version,\n  qos:         meta.qos,\n  rate_mps:    meta.rate_mps,\n  msg_count:   Number(meta.msg_count || 0),\n  duration:    Number(meta.duration || 0),\n  t_pub:       Number(meta.t_pub || 0)\n};\n\n// ---------- 1) Extract 32-byte key from sqlcipher output (wal / timeout noise safe) ----------\nconst rawOut = String(msg.payload ?? \"\").trim().replace(/^\"(.*)\"$/, \"$1\");\n\n// Split on non-hex characters and look for the LAST >=64-hex token\nconst tokens = rawOut\n  .split(/[^0-9A-Fa-f]+/)\n  .map(s => s.trim())\n  .filter(s => s.length > 0);\n\nlet hexKey = \"\";\nfor (let i = tokens.length - 1; i >= 0; i--) {\n  const t = tokens[i];\n  if (/^[0-9A-Fa-f]+$/.test(t) && t.length >= 64) {\n    hexKey = t;\n    break;\n  }\n}\n\nif (!hexKey) {\n  node.warn(`⛔ Not sending respond: no valid hex key found in Exec output: \"${rawOut.slice(0, 100)}\"`);\n  return null;\n}\n\n// We only want 32 bytes → 64 hex chars\nif (hexKey.length > 64) {\n  node.warn(`⚠️ Hex key longer than 64 chars (${hexKey.length}); slicing to 64.`);\n  hexKey = hexKey.slice(0, 64);\n}\n\nif (hexKey.length !== 64) {\n  node.warn(`⛔ Not sending respond: hex key length ${hexKey.length} (expected 64) for \"${topicName}\".`);\n  return null;\n}\n\nlet keyRaw;\ntry {\n  keyRaw = Buffer.from(hexKey, \"hex\");\n} catch (e) {\n  node.warn(`⛔ Failed to decode hex key for \"${topicName}\": ${e.message}`);\n  return null;\n}\n\nif (keyRaw.length !== 32) {\n  node.warn(`⛔ Not sending respond: decoded key length ${keyRaw.length} bytes (expected 32) for \"${topicName}\".`);\n  return null;\n}\n\nconst keyBlobB64 = keyRaw.toString('base64');\nflow.set('key_blob_b64', keyBlobB64);\n\n// ---------- 2) Derive AES key from topic-registration secret ----------\nconst secretPath = `/etc/mosquitto/certs/${devicename}-topic-registration-secret-key.bin`;\nlet secretBin;\ntry {\n  secretBin = fs.readFileSync(secretPath);\n} catch (e) {\n  node.error(`❌ Cannot read secret key: ${secretPath} → ${e.message}`);\n  return null;\n}\nconst aesKey = crypto.createHash('sha256').update(secretBin).digest();\n\n// ---------- 3) Encrypt plaintext respond (now includes meta) ----------\nconst status = 'OK';\nconst respondObj = {\n  status,\n  topic_name:   topicName,\n  key_blob_b64: keyBlobB64,\n\n  // embed run/test metadata from the original request\n  run_id:       metaOut.run_id,\n  run_tag:      metaOut.run_tag,\n  mode:         metaOut.mode,\n  path_class:   metaOut.path_class,\n  mqtt_version: metaOut.mqtt_version,\n  qos:          metaOut.qos,\n  rate_mps:     metaOut.rate_mps,\n  msg_count:    metaOut.msg_count,\n  duration:     metaOut.duration,\n  t_pub:        metaOut.t_pub\n};\n\nconst iv = crypto.randomBytes(16);\nlet encryptedHex;\ntry {\n  const cipher = crypto.createCipheriv('aes-256-cbc', aesKey, iv);\n  encryptedHex = cipher.update(JSON.stringify(respondObj), 'utf8', 'hex');\n  encryptedHex += cipher.final('hex');\n} catch (e) {\n  node.error('❌ Encryption failed: ' + e.message);\n  return null;\n}\n\n// ---------- 4) Sign canonical string (unchanged schema) ----------\nconst sunnyPriv = global.get('private_key', 'file');\nif (!sunnyPriv) {\n  node.error('❌ Missing Sunny private key in global(file) context.');\n  return null;\n}\nconst canonical = `${status}|${topicName}|${keyBlobB64}`;\nconst signer = crypto.createSign('sha256');\nsigner.update(canonical);\nsigner.end();\nconst signature = signer.sign(sunnyPriv, 'base64');\n\n// ---------- 5) Publish respond ----------\nmsg.topic = `topic/respond/${devicename}`;\nmsg.payload = {\n  encryptedData: encryptedHex,\n  iv: iv.toString('hex'),\n  signature\n};\n\nnode.warn(`📤 Encrypt/Sign topic-registration respond for \"${topicName}\" — sending to ${devicename}`);\nreturn msg;\n",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 3590,
+        "y": 1500,
+        "wires": [
+            [
+                "251f471b4a6204cc",
+                "a3a7e40033a896ad"
+            ]
+        ]
+    },
+    {
+        "id": "b4e45ccdb1df6d86",
+        "type": "comment",
+        "z": "a24adc94c330c9a1",
+        "name": " MQTT Central Broker (Sunny)",
+        "info": "",
+        "x": 1440,
+        "y": 1340,
+        "wires": []
+    },
+    {
+        "id": "9f23878c06bdc712",
+        "type": "comment",
+        "z": "a24adc94c330c9a1",
+        "name": "Topic Registration",
+        "info": "",
+        "x": 1410,
+        "y": 1400,
+        "wires": []
+    },
+    {
+        "id": "910381dd6db82d51",
+        "type": "comment",
+        "z": "a24adc94c330c9a1",
+        "name": "Topic Key Request Registration",
+        "info": "",
+        "x": 1450,
+        "y": 1700,
+        "wires": []
+    },
+    {
+        "id": "7c21cdd37769f825",
+        "type": "mqtt-broker",
+        "name": "",
+        "broker": "192.168.151.1",
+        "port": "8883",
+        "tls": "acb34eaf6a5ee7e1",
+        "clientid": "",
+        "autoConnect": true,
+        "usetls": true,
+        "protocolVersion": "4",
+        "keepalive": "60",
+        "cleansession": true,
+        "autoUnsubscribe": true,
+        "birthTopic": "",
+        "birthQos": "0",
+        "birthRetain": "false",
+        "birthPayload": "",
+        "birthMsg": {},
+        "closeTopic": "",
+        "closeQos": "0",
+        "closeRetain": "false",
+        "closePayload": "",
+        "closeMsg": {},
+        "willTopic": "",
+        "willQos": "0",
+        "willRetain": "false",
+        "willPayload": "",
+        "willMsg": {},
+        "userProps": "",
+        "sessionExpiry": ""
+    },
+    {
+        "id": "d9e12a3558e15ca7",
+        "type": "mqtt-broker",
+        "name": "",
+        "broker": "192.168.151.1",
+        "port": "8883",
+        "tls": "565b77223a05cca1",
+        "clientid": "",
+        "autoConnect": true,
+        "usetls": true,
+        "protocolVersion": "4",
+        "keepalive": "60",
+        "cleansession": true,
+        "autoUnsubscribe": true,
+        "birthTopic": "",
+        "birthQos": "0",
+        "birthRetain": "false",
+        "birthPayload": "",
+        "birthMsg": {},
+        "closeTopic": "",
+        "closeQos": "0",
+        "closeRetain": "false",
+        "closePayload": "",
+        "closeMsg": {},
+        "willTopic": "",
+        "willQos": "0",
+        "willRetain": "false",
+        "willPayload": "",
+        "willMsg": {},
+        "userProps": "",
+        "sessionExpiry": ""
+    },
+    {
+        "id": "acb34eaf6a5ee7e1",
+        "type": "tls-config",
+        "name": "",
+        "cert": "/etc/mosquitto/certs/sunny.pem",
+        "key": "/etc/mosquitto/certs/sunny-key.pem",
+        "ca": "/etc/mosquitto/certs/MQTTS.pem",
+        "certname": "",
+        "keyname": "",
+        "caname": "",
+        "servername": "sunny",
+        "verifyservercert": true,
+        "alpnprotocol": ""
+    },
+    {
+        "id": "565b77223a05cca1",
+        "type": "tls-config",
+        "name": "",
+        "cert": "/etc/mosquitto/certs/sunny.pem",
+        "key": "/etc/mosquitto/certs/sunny-key.pem",
+        "ca": "/etc/mosquitto/certs/MQTTS.pem",
+        "certname": "",
+        "keyname": "",
+        "caname": "",
+        "servername": "sunny",
+        "verifyservercert": true,
+        "alpnprotocol": ""
+    }
+]

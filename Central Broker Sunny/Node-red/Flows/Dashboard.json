@@ -1,0 +1,1102 @@
+[
+    {
+        "id": "tab_sunny_mon",
+        "type": "tab",
+        "label": "Dashboard",
+        "disabled": false,
+        "info": ""
+    },
+    {
+        "id": "inj_refresh",
+        "type": "inject",
+        "z": "tab_sunny_mon",
+        "name": "Refresh device list",
+        "props": [
+            {
+                "p": "payload"
+            }
+        ],
+        "repeat": "",
+        "crontab": "",
+        "once": true,
+        "onceDelay": 1,
+        "topic": "",
+        "payload": "",
+        "payloadType": "str",
+        "x": 290,
+        "y": 460,
+        "wires": [
+            [
+                "exec_sql_list"
+            ]
+        ]
+    },
+    {
+        "id": "exec_sql_list",
+        "type": "exec",
+        "z": "tab_sunny_mon",
+        "command": "bash -lc \"echo -e \\\"PRAGMA key='${DB_PASSWORD}'; SELECT device_id, device_name, authentication_status, is_broker, registered_at, mac_address_1, mac_address_2 FROM DeviceProfile;\\\" | sqlcipher -separator '|' /etc/mosquitto/certs/update_database.db\"",
+        "addpay": false,
+        "append": "",
+        "useSpawn": "false",
+        "timer": "",
+        "winHide": false,
+        "name": "SQLCipher: Device list",
+        "x": 520,
+        "y": 480,
+        "wires": [
+            [
+                "fn_parse_list"
+            ],
+            [],
+            []
+        ]
+    },
+    {
+        "id": "fn_parse_list",
+        "type": "function",
+        "z": "tab_sunny_mon",
+        "name": "Parse -> dropdown options + table rows",
+        "func": "// Input: stdout lines as single string\nconst raw = msg.payload || \"\";\nconst lines = raw.split(/\\r?\\n/).filter(Boolean);\nconst rows = [];\nconst mapById = {};\n\nfor (const line of lines) {\n  const parts = line.split('|');\n  if (parts.length < 7) continue;\n  const [device_id, device_name, authentication_status, is_broker, registered_at, mac1, mac2] = parts;\n  const reg = Number(registered_at) || 0;\n\n  const row = {\n    device_id,\n    device_name,\n    authentication_status,\n    is_broker: (String(is_broker) === '1') ? 'yes' : 'no',\n    registered_at: reg,\n    registered_at_human: reg ? new Date(reg * 1000).toISOString() : \"\",\n    mac1, mac2,\n    last_seen: flow.get(`lastSeen_${device_name}`) || 0,\n    online: false\n  };\n\n  // online if heartbeat in last 65s\n  const now = Date.now();\n  row.online = (now - row.last_seen) < 65000;\n\n  rows.push(row);\n  mapById[device_id] = row;\n}\n\n// Save maps\nflow.set('deviceRows', rows);\nflow.set('deviceMapById', mapById);\n\n// Dropdown options (array of {\"Label\": \"value\"} objects)\nmsg.options = rows.map(r => {\n  const label = `${r.device_name}`;\n  const o = {};\n  o[label] = r.device_id;\n  return o;\n});\n\n// For overview table\nconst overview = rows.map(r => ({\n  device_name: r.device_name,\n  device_id: r.device_id,\n  online: r.online ? 'online' : 'offline',\n  auth: r.authentication_status,\n  is_broker: r.is_broker,\n  last_seen: r.last_seen ? new Date(r.last_seen).toISOString() : ''\n}));\n\nnode.status({ text: `${rows.length} device(s)` });\nreturn [{ payload: overview, options: msg.options }];\n",
+        "outputs": 1,
+        "timeout": "",
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 820,
+        "y": 480,
+        "wires": [
+            [
+                "ui_table_overview",
+                "ui_dropdown_devices"
+            ]
+        ]
+    },
+    {
+        "id": "ui_dropdown_devices",
+        "type": "ui_dropdown",
+        "z": "tab_sunny_mon",
+        "name": "Select device",
+        "label": "Select device",
+        "tooltip": "",
+        "place": "Choose a device",
+        "group": "ui_group_detail",
+        "order": 1,
+        "width": "24",
+        "height": "1",
+        "passthru": true,
+        "multiple": false,
+        "options": [],
+        "payload": "",
+        "topic": "",
+        "topicType": "str",
+        "className": "",
+        "x": 990,
+        "y": 400,
+        "wires": [
+            [
+                "fn_on_select"
+            ]
+        ]
+    },
+    {
+        "id": "fn_on_select",
+        "type": "function",
+        "z": "tab_sunny_mon",
+        "name": "Lookup + query details",
+        "func": "const device_id = String(msg.payload || \"\").trim();\nconst map = flow.get(\"deviceMapById\") || {};\nconst row = map[device_id];\nif (!row) { node.warn(`No row for device_id=${device_id}`); return null; }\n\nflow.set(\"selectedDevice\", row);\nconst dbPath = \"/etc/mosquitto/certs/update_database.db\";\nconst pragmaKey = env.get(\"DB_PASSWORD\");\n\n// Build SQL safely; keep WHERE on device_id (not device_name)\nconst esc = s => s.replace(/'/g, \"''\");\nconst sql = `\nPRAGMA key = '${pragmaKey}';\nSELECT device_id, device_name, authentication_status, is_broker, registered_at, mac_address_1, mac_address_2\nFROM DeviceProfile\nWHERE device_id='${esc(device_id)}';\n`;\n\nmsg.payload = `sqlcipher ${dbPath} <<< \"${sql.trim()}\"`;       // send full SQL to Exec via stdin\nreturn msg;\n",
+        "outputs": 1,
+        "timeout": "",
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 1160,
+        "y": 480,
+        "wires": [
+            [
+                "exec_sql_detail"
+            ]
+        ]
+    },
+    {
+        "id": "exec_sql_detail",
+        "type": "exec",
+        "z": "tab_sunny_mon",
+        "command": "",
+        "addpay": "payload",
+        "append": "",
+        "useSpawn": "false",
+        "timer": "",
+        "winHide": false,
+        "name": "SQLCipher: Device detail",
+        "x": 1290,
+        "y": 560,
+        "wires": [
+            [
+                "fn_parse_detail"
+            ],
+            [],
+            []
+        ]
+    },
+    {
+        "id": "fn_parse_detail",
+        "type": "function",
+        "z": "tab_sunny_mon",
+        "name": "Render details card",
+        "func": "const raw = msg.payload||\"\";\nconst line = raw.split(/\\r?\\n/).filter(Boolean)[0]||\"\";\nconst p = line.split('|');\nif (p.length < 7) return null;\nconst [device_id, device_name, authentication_status, is_broker, registered_at, mac1, mac2] = p;\n\nconst twoLine = (s, width=32) => {\n  s = String(s||\"\");\n  return s.length > width ? s.slice(0, width) + \"<br>\" + s.slice(width) : s;\n};\n\nconst sel = {device_id, device_name, authentication_status, is_broker, registered_at:Number(registered_at)||0, mac1, mac2};\nconst lastSeen = flow.get(`lastSeen_${device_name}`)||0;\nconst online = (Date.now()-lastSeen) < 65000;\n\nconst html = `\n<div style='display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px'>\n  <div><b>Device</b><br>${device_name}</div>\n  <div><b>ID</b><br><span style=\"font-family:monospace\">${twoLine(device_id,32)}</span></div>\n  <div><b>Broker</b><br>${String(is_broker)==='1'?'yes':'no'}</div>\n  <div><b>Auth</b><br>${authentication_status}</div>\n  <div><b>Online</b><br>${online?'online':'offline'}</div>\n  <div><b>Last seen</b><br>${ lastSeen ? new Date(lastSeen).toISOString() : '' }</div>\n  <div><b>MAC #1</b><br>${mac1}</div>\n  <div><b>MAC #2</b><br>${mac2}</div>\n  <div><b>Registered</b><br>${ sel.registered_at? new Date(sel.registered_at*1000).toISOString():'' }</div>\n</div>`;\nreturn [{payload:html}, {payload:`devices/${device_name}/#`}, {payload:`devices/${device_name}/log`}];\n",
+        "outputs": 3,
+        "timeout": "",
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 1450,
+        "y": 480,
+        "wires": [
+            [
+                "ui_template_detail"
+            ],
+            [],
+            []
+        ]
+    },
+    {
+        "id": "ui_template_detail",
+        "type": "ui_template",
+        "z": "tab_sunny_mon",
+        "group": "ui_group_detail",
+        "name": "Device card",
+        "order": 2,
+        "width": "24",
+        "height": "4",
+        "format": "<md-card>\n  <md-card-content>\n    <div ng-bind-html=\"msg.payload | trusted\"></div>\n  </md-card-content>\n</md-card>\n",
+        "storeOutMessages": false,
+        "fwdInMessages": true,
+        "resendOnRefresh": true,
+        "templateScope": "local",
+        "className": "",
+        "x": 1590,
+        "y": 560,
+        "wires": [
+            [
+                "0fe0858cfee2ac12",
+                "bc9b16ef118bed45"
+            ]
+        ]
+    },
+    {
+        "id": "mqtt_in_heartbeat",
+        "type": "mqtt in",
+        "z": "tab_sunny_mon",
+        "name": "Heartbeats",
+        "topic": "devices/+/heartbeat",
+        "qos": "0",
+        "datatype": "auto",
+        "broker": "47b12596f39b9eb8",
+        "nl": false,
+        "rap": true,
+        "rh": 0,
+        "inputs": 0,
+        "x": 220,
+        "y": 580,
+        "wires": [
+            [
+                "fn_mark_seen"
+            ]
+        ]
+    },
+    {
+        "id": "fn_mark_seen",
+        "type": "function",
+        "z": "tab_sunny_mon",
+        "name": "Update lastSeen + refresh table",
+        "func": "const tpc = msg.topic || '';\nconst m = tpc.match(/^devices\\/([^/]+)\\/heartbeat$/);\nif (!m) return null;\nconst name = m[1];\nconst now = Date.now();\nflow.set(`lastSeen_${name}`, now);\n// refresh overview table rows if present\nconst rows = flow.get('deviceRows')||[];\nconst updated = rows.map(r => {\n  if (r.device_name === name) {\n    r.last_seen = now;\n    r.online = true;\n  }\n  return r;\n});\nconst overview = updated.map(r => ({\n  device_name: r.device_name,\n  device_id: r.device_id,\n  online: r.online ? 'online' : 'offline',\n  auth: r.authentication_status,\n  is_broker: r.is_broker,\n  last_seen: r.last_seen ? new Date(r.last_seen).toISOString() : ''\n}));\nreturn {payload: overview};",
+        "outputs": 1,
+        "timeout": "",
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 510,
+        "y": 580,
+        "wires": [
+            [
+                "ui_table_overview"
+            ]
+        ]
+    },
+    {
+        "id": "ui_text_note",
+        "type": "ui_text",
+        "z": "tab_sunny_mon",
+        "group": "ui_group_overview",
+        "order": 0,
+        "width": "24",
+        "height": "1",
+        "name": "Note",
+        "label": "Tip",
+        "format": "Click **Refresh device list** if you add or remove devices from the DB.",
+        "layout": "row-spread",
+        "className": "",
+        "style": false,
+        "font": "",
+        "fontSize": "",
+        "color": "#000000",
+        "x": 630,
+        "y": 420,
+        "wires": []
+    },
+    {
+        "id": "ui_button_refresh",
+        "type": "ui_button",
+        "z": "tab_sunny_mon",
+        "name": "Refresh device list",
+        "group": "ui_group_overview",
+        "order": 2,
+        "width": "6",
+        "height": "1",
+        "passthru": false,
+        "label": "Refresh",
+        "tooltip": "",
+        "color": "",
+        "bgcolor": "",
+        "className": "",
+        "icon": "refresh",
+        "payload": "",
+        "payloadType": "str",
+        "topic": "",
+        "topicType": "str",
+        "x": 310,
+        "y": 520,
+        "wires": [
+            [
+                "exec_sql_list"
+            ]
+        ]
+    },
+    {
+        "id": "ui_table_overview",
+        "type": "ui_table",
+        "z": "tab_sunny_mon",
+        "group": "ui_group_overview",
+        "name": "Devices (live)",
+        "order": 1,
+        "width": "24",
+        "height": "12",
+        "columns": [
+            {
+                "field": "device_name",
+                "title": "Device",
+                "width": "20%",
+                "align": "left",
+                "formatter": "plaintext",
+                "formatterParams": {
+                    "target": "_blank"
+                }
+            },
+            {
+                "field": "device_id",
+                "title": "ID",
+                "width": "28%",
+                "align": "left",
+                "formatter": "plaintext",
+                "formatterParams": {
+                    "target": "_blank"
+                }
+            },
+            {
+                "field": "online",
+                "title": "Online",
+                "width": "12%",
+                "align": "center",
+                "formatter": "plaintext",
+                "formatterParams": {
+                    "target": "_blank"
+                }
+            },
+            {
+                "field": "auth",
+                "title": "Auth",
+                "width": "12%",
+                "align": "center",
+                "formatter": "plaintext",
+                "formatterParams": {
+                    "target": "_blank"
+                }
+            },
+            {
+                "field": "is_broker",
+                "title": "Broker",
+                "width": "10%",
+                "align": "center",
+                "formatter": "plaintext",
+                "formatterParams": {
+                    "target": "_blank"
+                }
+            },
+            {
+                "field": "last_seen",
+                "title": "Last Seen",
+                "width": "18%",
+                "align": "left",
+                "formatter": "plaintext",
+                "formatterParams": {
+                    "target": "_blank"
+                }
+            }
+        ],
+        "outputs": 0,
+        "cts": false,
+        "x": 760,
+        "y": 540,
+        "wires": []
+    },
+    {
+        "id": "0fe0858cfee2ac12",
+        "type": "ui_button",
+        "z": "tab_sunny_mon",
+        "name": "",
+        "group": "ui_group_detail",
+        "order": 3,
+        "width": 0,
+        "height": 0,
+        "passthru": false,
+        "label": "Renew Key",
+        "tooltip": "",
+        "color": "",
+        "bgcolor": "",
+        "className": "",
+        "icon": "",
+        "payload": "",
+        "payloadType": "str",
+        "topic": "topic",
+        "topicType": "msg",
+        "x": 1830,
+        "y": 560,
+        "wires": [
+            [
+                "fd9d4c5effa952eb"
+            ]
+        ]
+    },
+    {
+        "id": "fd9d4c5effa952eb",
+        "type": "function",
+        "z": "tab_sunny_mon",
+        "name": "Prpeare to send renew key message",
+        "func": "// Click from ui_button comes in here\n// Uses the device saved by your select flow: flow.set('selectedDevice', row)\n\nconst sel = flow.get('selectedDevice');\nif (!sel) {\n  node.warn(\"No device selected yet.\");\n  // (optional) show a toast if you have ui_notification\n  return null;\n}\n\n// sanitize device name for MQTT topic\nconst devName = String(sel.device_name || \"\").trim();\nconst topicSafe = devName.replace(/[^A-Za-z0-9._-]/g, \"-\");\n\n// Build dynamic topic and payload\nmsg.topic = `renew/ECC/${topicSafe}`;\nnode.warn(msg.topic);\n// choose the payload style you want:\nmsg.payload = {\n  cmd: \"re-new keys\",\n  device_id: sel.device_id,\n  device_name: sel.device_name,\n  ts: Date.now()\n};\n\n\nreturn msg;\n",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 2070,
+        "y": 560,
+        "wires": [
+            [
+                "117f72ad93c19395"
+            ]
+        ]
+    },
+    {
+        "id": "117f72ad93c19395",
+        "type": "mqtt out",
+        "z": "tab_sunny_mon",
+        "name": "Renew Key",
+        "topic": "",
+        "qos": "0",
+        "retain": "",
+        "respTopic": "",
+        "contentType": "",
+        "userProps": "",
+        "correl": "",
+        "expiry": "",
+        "broker": "d9e12a3558e15ca7",
+        "x": 2330,
+        "y": 560,
+        "wires": []
+    },
+    {
+        "id": "82cf9b251d73b963",
+        "type": "inject",
+        "z": "tab_sunny_mon",
+        "name": "Refresh",
+        "props": [
+            {
+                "p": "payload"
+            }
+        ],
+        "repeat": "",
+        "crontab": "",
+        "once": true,
+        "onceDelay": 0.5,
+        "topic": "",
+        "payload": "",
+        "payloadType": "str",
+        "x": 300,
+        "y": 1080,
+        "wires": [
+            [
+                "f29cf9c7f21c7ba7"
+            ]
+        ]
+    },
+    {
+        "id": "38ac781fb7738705",
+        "type": "ui_button",
+        "z": "tab_sunny_mon",
+        "name": "",
+        "group": "a099e71f278724a2",
+        "order": 5,
+        "width": 4,
+        "height": 1,
+        "passthru": false,
+        "label": "↻ Refresh",
+        "tooltip": "",
+        "color": "",
+        "bgcolor": "",
+        "className": "",
+        "icon": "",
+        "payload": "",
+        "payloadType": "str",
+        "topic": "",
+        "topicType": "str",
+        "x": 290,
+        "y": 1000,
+        "wires": [
+            [
+                "f29cf9c7f21c7ba7"
+            ]
+        ]
+    },
+    {
+        "id": "f29cf9c7f21c7ba7",
+        "type": "exec",
+        "z": "tab_sunny_mon",
+        "command": "/usr/local/bin/stepca_export_latest.sh",
+        "addpay": false,
+        "append": "",
+        "useSpawn": "false",
+        "timer": "",
+        "winHide": false,
+        "oldrc": false,
+        "name": "List latest cert per CN",
+        "x": 520,
+        "y": 1000,
+        "wires": [
+            [
+                "200fa72abd311a01"
+            ],
+            [],
+            []
+        ]
+    },
+    {
+        "id": "200fa72abd311a01",
+        "type": "json",
+        "z": "tab_sunny_mon",
+        "name": "JSON → object[]",
+        "property": "payload",
+        "action": "",
+        "pretty": false,
+        "x": 750,
+        "y": 1000,
+        "wires": [
+            [
+                "0c63dee72e181b1f",
+                "70ceec9e0e0af167"
+            ]
+        ]
+    },
+    {
+        "id": "0c63dee72e181b1f",
+        "type": "function",
+        "z": "tab_sunny_mon",
+        "name": "Set ui_table config",
+        "func": "// Expect: msg.payload = array of { cn, serial_hex, serial_dec, issued, expire }\nconst rows = (Array.isArray(msg.payload) ? msg.payload : []).map(r => {\n    const hex = r.serial_hex || \"\";\n    const dec = (r.serial_dec != null) ? String(r.serial_dec) : \"\";\n    return {\n        cn: r.cn || \"\",\n        serial_hex: hex,\n        serial_dec: dec,\n        issued: r.issued || \"\",\n        expire: r.expire || \"\",\n        // best arg for `step ca revoke` (decimal preferred, else 0xHEX)\n        _serial_arg: dec ? dec : (hex ? (\"0x\" + hex) : \"\")\n    };\n});\n\nmsg.payload = rows;\n\n// Configure ui_table (single-row select)\nmsg.ui_control = {\n    tabulator: {\n        layout: \"fitColumns\",\n        selectable: 1,\n        initialSort: [{ column: \"cn\", dir: \"asc\" }],\n        columns: [\n            { title: \"CN\",           field: \"cn\",         widthGrow: 1 },\n            { title: \"Serial (hex)\", field: \"serial_hex\", widthGrow: 2 },\n            { title: \"Serial (dec)\", field: \"serial_dec\", widthGrow: 2 },\n            { title: \"Issued\",       field: \"issued\",     widthGrow: 1 },\n            { title: \"Expire\",       field: \"expire\",     widthGrow: 1 }\n        ]\n    }\n};\n\nreturn msg;\n",
+        "outputs": 1,
+        "timeout": "",
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 1050,
+        "y": 1040,
+        "wires": [
+            [
+                "70ceec9e0e0af167"
+            ]
+        ]
+    },
+    {
+        "id": "70ceec9e0e0af167",
+        "type": "ui_table",
+        "z": "tab_sunny_mon",
+        "group": "a099e71f278724a2",
+        "name": "Certificates",
+        "order": 4,
+        "width": "24",
+        "height": "12",
+        "columns": [],
+        "outputs": 1,
+        "cts": true,
+        "x": 1090,
+        "y": 920,
+        "wires": [
+            [
+                "0ebf0feae8d38a62"
+            ]
+        ]
+    },
+    {
+        "id": "0ebf0feae8d38a62",
+        "type": "function",
+        "z": "tab_sunny_mon",
+        "name": "Store selected row",
+        "func": "// Robustly get the row\nlet row = msg.payload;\nif (Array.isArray(row)) row = row[0];\nif (row && row.data && typeof row.data === \"object\") row = row.data;\n\nif (!row || typeof row !== \"object\") {\n  node.warn(\"No row selected\");\n  return null;\n}\nconst device = row.cn\n// Ensure serials are strings (avoid BigInt precision loss in UI)\nconst sel = {\n  cn: row.cn || \"\",\n  serial_hex: row.serial_hex ? String(row.serial_hex) : \"\",\n  serial_dec: row.serial_dec ? String(row.serial_dec) : \"\",\n  issued: row.issued || \"\",\n  expire: row.expire || \"\"\n};\n\nflow.set(\"selectedCert\", sel);  // <- saved in this Flow (tab)\n\n// Optional: show nice text\nlet display = `Selected → CN=${sel.cn}`;\nif (sel.serial_dec) display += `, Serial(Dec)=${sel.serial_dec}`;\nif (sel.serial_hex) display += `, Serial(Hex)=${sel.serial_hex}`;\nreturn { payload: display };\n",
+        "outputs": 1,
+        "timeout": "",
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 1310,
+        "y": 980,
+        "wires": [
+            [
+                "1e79c633958cbe43"
+            ]
+        ]
+    },
+    {
+        "id": "1e79c633958cbe43",
+        "type": "ui_text",
+        "z": "tab_sunny_mon",
+        "group": "a099e71f278724a2",
+        "order": 6,
+        "width": 24,
+        "height": 1,
+        "name": "Selected",
+        "label": "Selected:",
+        "format": "{{msg.payload}}",
+        "layout": "row-spread",
+        "className": "",
+        "style": false,
+        "font": "",
+        "fontSize": "",
+        "color": "#000000",
+        "x": 1560,
+        "y": 1000,
+        "wires": []
+    },
+    {
+        "id": "772b572623e955e2",
+        "type": "ui_button",
+        "z": "tab_sunny_mon",
+        "name": "",
+        "group": "a099e71f278724a2",
+        "order": 7,
+        "width": 6,
+        "height": 1,
+        "passthru": false,
+        "label": "⛔ Revoke selected",
+        "tooltip": "",
+        "color": "",
+        "bgcolor": "",
+        "className": "",
+        "icon": "",
+        "payload": "revoke",
+        "payloadType": "str",
+        "topic": "",
+        "topicType": "str",
+        "x": 300,
+        "y": 1240,
+        "wires": [
+            [
+                "a659814ab9b5c84d"
+            ]
+        ]
+    },
+    {
+        "id": "a659814ab9b5c84d",
+        "type": "function",
+        "z": "tab_sunny_mon",
+        "name": "Build revoke command",
+        "func": "const row = flow.get(\"selectedCert\");\nif (!row) { node.warn(\"No selection in flow\"); return null; }\n\n// prefer decimal, else 0xHEX\nlet serial = (row.serial_dec && String(row.serial_dec).trim()) ? String(row.serial_dec).trim() : \"\";\nif (!serial && row.serial_hex && String(row.serial_hex).trim()) {\n  serial = \"0x\" + String(row.serial_hex).trim().replace(/^0x/i,\"\");\n}\nif (!serial) { node.warn(\"Selected row has no serial\"); return null; }\n\nconst CA_URL = env.get(\"CA_URL\") || \"https://192.168.151.1:8443\";\nconst ROOT   = env.get(\"ROOT_CRT\") || \"/home/step/.step/certs/root_ca.crt\";\nconst PROV   = env.get(\"PROV_NAME\") || \"Admin JWK\";\nconst PASS   = env.get(\"PROV_PASS_FILE\") || \"/etc/step-ca/secrets/provisioner_password\";\n\n// NOTE: subject (serial) is positional FIRST, and --revoke has NO value\nmsg.serial = serial;\nmsg.payload =\n  `step ca token \"${serial}\" --revoke ` +\n  `--provisioner \"${PROV}\" ` +\n  `--provisioner-password-file \"${PASS}\" ` +\n  `--ca-url \"${CA_URL}\" --root \"${ROOT}\" | tr -d '\\\\n'`;\n\nreturn msg;\n",
+        "outputs": 2,
+        "timeout": "",
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 560,
+        "y": 1240,
+        "wires": [
+            [
+                "73459409382d5fea"
+            ],
+            []
+        ]
+    },
+    {
+        "id": "73459409382d5fea",
+        "type": "exec",
+        "z": "tab_sunny_mon",
+        "command": "",
+        "addpay": "payload",
+        "append": "",
+        "useSpawn": "false",
+        "timer": "",
+        "winHide": false,
+        "oldrc": false,
+        "name": "step ca revoke (admin)",
+        "x": 800,
+        "y": 1180,
+        "wires": [
+            [
+                "f3bb0160064c8bf5",
+                "7f6d0d7cf28bd0c7"
+            ],
+            [],
+            []
+        ]
+    },
+    {
+        "id": "fd84dd9927dd30e2",
+        "type": "ui_toast",
+        "z": "tab_sunny_mon",
+        "position": "dialog",
+        "displayTime": "3",
+        "highlight": "",
+        "sendall": true,
+        "outputs": 1,
+        "ok": "OK",
+        "cancel": "Cancel",
+        "raw": false,
+        "className": "",
+        "topic": "",
+        "name": "Toast",
+        "x": 1290,
+        "y": 1300,
+        "wires": [
+            [
+                "205959f059fd027b"
+            ]
+        ]
+    },
+    {
+        "id": "f3bb0160064c8bf5",
+        "type": "function",
+        "z": "tab_sunny_mon",
+        "name": "Revoke",
+        "func": "const token = (msg.payload || \"\").trim();\nif (!token) { node.warn(\"Empty token\"); return null; }\n\nconst serial = msg.serial;\nconst CA_URL = env.get(\"CA_URL\") || \"https://192.168.151.1:8443\";\nconst ROOT   = env.get(\"ROOT_CRT\") || \"/home/step/.step/certs/root_ca.crt\";\n\nmsg.payload =\n  `step ca revoke ${serial} --token \"${token}\" ` +\n  `--ca-url \"${CA_URL}\" --root \"${ROOT}\"`;\n\nreturn msg;\n",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 980,
+        "y": 1240,
+        "wires": [
+            [
+                "b6cc7ff4b792714b"
+            ]
+        ]
+    },
+    {
+        "id": "b6cc7ff4b792714b",
+        "type": "exec",
+        "z": "tab_sunny_mon",
+        "command": "",
+        "addpay": "payload",
+        "append": "",
+        "useSpawn": "false",
+        "timer": "",
+        "winHide": false,
+        "oldrc": false,
+        "name": "Revoke Certificate",
+        "x": 1110,
+        "y": 1180,
+        "wires": [
+            [],
+            [
+                "3bf490e58f0a9e76"
+            ],
+            []
+        ]
+    },
+    {
+        "id": "3bf490e58f0a9e76",
+        "type": "function",
+        "z": "tab_sunny_mon",
+        "name": "Popup Message Preparation",
+        "func": "// stdout from revoke Exec\nconst out = (msg.payload || \"\").trim();\nconst ok  = /has been revoked/i.test(out) || msg.rc === 0; // rc from Exec if wired\n\nmsg.topic   = ok ? \"Revocation\" : \"Revocation (check logs)\";\nmsg.payload = ok\n  ? \"✅ Certificate revoked successfully!\"\n  : \"⚠️ Revoke finished. Details:\\n\" + out;\n\n// send to ui_toast\nreturn msg;\n",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 1260,
+        "y": 1240,
+        "wires": [
+            [
+                "fd84dd9927dd30e2",
+                "38b2d1f54db21748"
+            ]
+        ]
+    },
+    {
+        "id": "205959f059fd027b",
+        "type": "link out",
+        "z": "tab_sunny_mon",
+        "name": "Revoke Refresh",
+        "mode": "link",
+        "links": [
+            "ed56c2012129f0c4"
+        ],
+        "x": 1245,
+        "y": 1360,
+        "wires": []
+    },
+    {
+        "id": "ed56c2012129f0c4",
+        "type": "link in",
+        "z": "tab_sunny_mon",
+        "name": "link in 5",
+        "links": [
+            "205959f059fd027b"
+        ],
+        "x": 265,
+        "y": 880,
+        "wires": [
+            [
+                "f29cf9c7f21c7ba7"
+            ]
+        ]
+    },
+    {
+        "id": "38b2d1f54db21748",
+        "type": "exec",
+        "z": "tab_sunny_mon",
+        "command": "step certificate fingerprint /home/step/.step/certs/root_ca.crt",
+        "addpay": "",
+        "append": "",
+        "useSpawn": "false",
+        "timer": "",
+        "winHide": false,
+        "oldrc": false,
+        "name": "Check CA certificate finger print",
+        "x": 1410,
+        "y": 1160,
+        "wires": [
+            [
+                "b033054a8ac6bc43"
+            ],
+            [],
+            []
+        ]
+    },
+    {
+        "id": "b033054a8ac6bc43",
+        "type": "function",
+        "z": "tab_sunny_mon",
+        "name": "Revoke Respond",
+        "func": "const fs = global.get('fs');\nconst row = flow.get(\"selectedCert\");\nif (!row) { node.warn(\"No selection in flow\"); return null; }\nconst device = row.cn;\nnode.warn(device);\n\nconst prov_pass_path = \"/etc/step-ca/secrets/provisioner_password\";\nconst fingerprint=msg.payload;\nconst certFilePath = \"/etc/mosquitto/certs/MQTTS.pem\";\nnode.warn(fingerprint);\nconst ca_url = \"https://192.168.151.1:8443\";\n\n\n\n// Function to read UTF-8 file contents\nfunction readFileSync(filePath) {\n    return fs.readFileSync(filePath, 'utf8').trim();\n}\n\nconst prov_pass= readFileSync(prov_pass_path);\nconst MQTTS_CA_Certificate = readFileSync(certFilePath);\n\n\n\n\nmsg.payload = {\n    MQTTS_CA_Certificate: MQTTS_CA_Certificate,\nfingerprint: fingerprint,\n    ca_url:ca_url,\n    prov_pass:prov_pass,\n    device:device\n};\n\nmsg.topic = `revoke/MQTTS/${device}`;\n\nreturn msg;\n",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 1670,
+        "y": 1200,
+        "wires": [
+            [
+                "9cf2a4022d42002a"
+            ]
+        ]
+    },
+    {
+        "id": "9cf2a4022d42002a",
+        "type": "mqtt out",
+        "z": "tab_sunny_mon",
+        "name": "Revoke MQTTS",
+        "topic": "",
+        "qos": "0",
+        "retain": "",
+        "respTopic": "",
+        "contentType": "",
+        "userProps": "",
+        "correl": "",
+        "expiry": "",
+        "broker": "d9e12a3558e15ca7",
+        "x": 1900,
+        "y": 1160,
+        "wires": []
+    },
+    {
+        "id": "bc9b16ef118bed45",
+        "type": "ui_button",
+        "z": "tab_sunny_mon",
+        "name": "",
+        "group": "ui_group_detail",
+        "order": 4,
+        "width": 0,
+        "height": 0,
+        "passthru": false,
+        "label": "Renew JWT",
+        "tooltip": "",
+        "color": "",
+        "bgcolor": "",
+        "className": "",
+        "icon": "",
+        "payload": "",
+        "payloadType": "str",
+        "topic": "topic",
+        "topicType": "msg",
+        "x": 1810,
+        "y": 380,
+        "wires": [
+            [
+                "64095d7cea85b4ad"
+            ]
+        ]
+    },
+    {
+        "id": "64095d7cea85b4ad",
+        "type": "function",
+        "z": "tab_sunny_mon",
+        "name": "Prpeare to send renew JWT message",
+        "func": "// Click from ui_button comes in here\n// Uses the device saved by your select flow: flow.set('selectedDevice', row)\n\nconst sel = flow.get('selectedDevice');\nif (!sel) {\n  node.warn(\"No device selected yet.\");\n  // (optional) show a toast if you have ui_notification\n  return null;\n}\n\n// sanitize device name for MQTT topic\nconst devName = String(sel.device_name || \"\").trim();\nconst topicSafe = devName.replace(/[^A-Za-z0-9._-]/g, \"-\");\n\n// Build dynamic topic and payload\nmsg.topic = `renew/JWT/${topicSafe}`;\nnode.warn(msg.topic);\n// choose the payload style you want:\nmsg.payload = {\n  cmd: \"re-new JWT\",\n  device_id: sel.device_id,\n  device_name: sel.device_name,\n  ts: Date.now()\n};\n\n\nreturn msg;\n",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 2050,
+        "y": 380,
+        "wires": [
+            [
+                "d1f432696c358c07"
+            ]
+        ]
+    },
+    {
+        "id": "d1f432696c358c07",
+        "type": "mqtt out",
+        "z": "tab_sunny_mon",
+        "name": "Renew JWT",
+        "topic": "",
+        "qos": "0",
+        "retain": "",
+        "respTopic": "",
+        "contentType": "",
+        "userProps": "",
+        "correl": "",
+        "expiry": "",
+        "broker": "d9e12a3558e15ca7",
+        "x": 2310,
+        "y": 380,
+        "wires": []
+    },
+    {
+        "id": "4b1fd07ea0e85e3e",
+        "type": "comment",
+        "z": "tab_sunny_mon",
+        "name": "List Devices to monitor",
+        "info": "",
+        "x": 300,
+        "y": 380,
+        "wires": []
+    },
+    {
+        "id": "2bcf88818a33fd8c",
+        "type": "comment",
+        "z": "tab_sunny_mon",
+        "name": "List Devices's MQTTS log to monitor",
+        "info": "",
+        "x": 340,
+        "y": 820,
+        "wires": []
+    },
+    {
+        "id": "0ed552d03701330c",
+        "type": "comment",
+        "z": "tab_sunny_mon",
+        "name": "Revoke MQTTS certificate",
+        "info": "",
+        "x": 310,
+        "y": 1180,
+        "wires": []
+    },
+    {
+        "id": "08b63c099252fdc1",
+        "type": "comment",
+        "z": "tab_sunny_mon",
+        "name": " MQTT Central Broker (Sunny)",
+        "info": "",
+        "x": 340,
+        "y": 760,
+        "wires": []
+    },
+    {
+        "id": "8d2afcb2666ad45a",
+        "type": "comment",
+        "z": "tab_sunny_mon",
+        "name": " MQTT Central Broker (Sunny)",
+        "info": "",
+        "x": 320,
+        "y": 340,
+        "wires": []
+    },
+    {
+        "id": "7f6d0d7cf28bd0c7",
+        "type": "debug",
+        "z": "tab_sunny_mon",
+        "name": "debug 53",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "false",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 900,
+        "y": 1100,
+        "wires": []
+    },
+    {
+        "id": "ui_group_detail",
+        "type": "ui_group",
+        "name": "Device Detail",
+        "tab": "ui_tab_main",
+        "order": 2,
+        "disp": true,
+        "width": "24",
+        "collapse": false,
+        "className": ""
+    },
+    {
+        "id": "47b12596f39b9eb8",
+        "type": "mqtt-broker",
+        "name": "",
+        "broker": "192.168.151.1",
+        "port": "1883",
+        "clientid": "",
+        "autoConnect": true,
+        "usetls": false,
+        "protocolVersion": "4",
+        "keepalive": "60",
+        "cleansession": true,
+        "autoUnsubscribe": true,
+        "birthTopic": "",
+        "birthQos": "0",
+        "birthRetain": "false",
+        "birthPayload": "",
+        "birthMsg": {},
+        "closeTopic": "",
+        "closeQos": "0",
+        "closeRetain": "false",
+        "closePayload": "",
+        "closeMsg": {},
+        "willTopic": "",
+        "willQos": "0",
+        "willRetain": "false",
+        "willPayload": "",
+        "willMsg": {},
+        "userProps": "",
+        "sessionExpiry": ""
+    },
+    {
+        "id": "ui_group_overview",
+        "type": "ui_group",
+        "name": "Overview",
+        "tab": "ui_tab_main",
+        "order": 1,
+        "disp": true,
+        "width": "24",
+        "collapse": false,
+        "className": ""
+    },
+    {
+        "id": "d9e12a3558e15ca7",
+        "type": "mqtt-broker",
+        "name": "",
+        "broker": "192.168.151.1",
+        "port": "8883",
+        "tls": "565b77223a05cca1",
+        "clientid": "",
+        "autoConnect": true,
+        "usetls": true,
+        "protocolVersion": "4",
+        "keepalive": "60",
+        "cleansession": true,
+        "autoUnsubscribe": true,
+        "birthTopic": "",
+        "birthQos": "0",
+        "birthRetain": "false",
+        "birthPayload": "",
+        "birthMsg": {},
+        "closeTopic": "",
+        "closeQos": "0",
+        "closeRetain": "false",
+        "closePayload": "",
+        "closeMsg": {},
+        "willTopic": "",
+        "willQos": "0",
+        "willRetain": "false",
+        "willPayload": "",
+        "willMsg": {},
+        "userProps": "",
+        "sessionExpiry": ""
+    },
+    {
+        "id": "a099e71f278724a2",
+        "type": "ui_group",
+        "name": "MQTTS",
+        "tab": "2cfbe449293bd3d2",
+        "order": 3,
+        "disp": true,
+        "width": "24",
+        "collapse": false,
+        "className": ""
+    },
+    {
+        "id": "ui_tab_main",
+        "type": "ui_tab",
+        "name": "Devices Monitor",
+        "icon": "dashboard",
+        "order": 1,
+        "disabled": false,
+        "hidden": false
+    },
+    {
+        "id": "565b77223a05cca1",
+        "type": "tls-config",
+        "name": "",
+        "cert": "/etc/mosquitto/certs/sunny.pem",
+        "key": "/etc/mosquitto/certs/sunny-key.pem",
+        "ca": "/etc/mosquitto/certs/MQTTS.pem",
+        "certname": "",
+        "keyname": "",
+        "caname": "",
+        "servername": "sunny",
+        "verifyservercert": true,
+        "alpnprotocol": ""
+    },
+    {
+        "id": "2cfbe449293bd3d2",
+        "type": "ui_tab",
+        "name": "MQTTS",
+        "icon": "dashboard",
+        "disabled": false,
+        "hidden": false
+    }
+]

@@ -1,0 +1,847 @@
+[
+    {
+        "id": "839bf97956c5212e",
+        "type": "tab",
+        "label": "Rotation and Revocation",
+        "disabled": false,
+        "info": "",
+        "env": []
+    },
+    {
+        "id": "e7cd4d6dbe21b245",
+        "type": "mqtt in",
+        "z": "839bf97956c5212e",
+        "name": "JWT Renew Request",
+        "topic": "renew/jwt/+",
+        "qos": "0",
+        "datatype": "auto-detect",
+        "broker": "f3cb7dcdae0abc98",
+        "nl": false,
+        "rap": true,
+        "rh": 0,
+        "inputs": 0,
+        "x": 860,
+        "y": 320,
+        "wires": [
+            [
+                "1e39250c3410b4b3"
+            ]
+        ]
+    },
+    {
+        "id": "1e39250c3410b4b3",
+        "type": "function",
+        "z": "839bf97956c5212e",
+        "name": "Prepare to select JWT",
+        "func": "// Sunny: store incoming payload, get device_name from topic, select JWT by device_id\n\nconst dbPath = \"/etc/mosquitto/certs/update_database.db\";\nconst pragmaKey = env.get(\"DB_PASSWORD\");\n\n// --- 1) Validate & save incoming payload to flow ---\nif (!msg.payload || typeof msg.payload !== \"object\") {\n    node.error(\"Invalid payload: expected { device_id, jwt }\");\n    return null;\n}\nlet { device_id, jwt } = msg.payload;\n\nif (!device_id || !jwt) {\n    node.error(\"Missing device_id or jwt in payload\");\n    return null;\n}\n\n// Save to flow context\nflow.set(\"renew_device_id\", device_id);\nflow.set(\"renew_jwt\", jwt);\n\n// --- 2) Extract device_name from topic (keep your flow) ---\nconst parts = (msg.topic || \"\").split(\"/\");\nmsg.device_name = parts[2] || \"\";  // e.g., \"jonny\"\n\n// --- 3) Build SELECT query for this device_id ---\ndevice_id = device_id.replace(/'/g, \"''\");  // escape quotes\n\nconst sqlSelect = `\nPRAGMA key = '${pragmaKey}';\nSELECT jwt_token\nFROM DeviceProfile\nWHERE device_id = '${device_id}';\n`.trim();\n\n// Exec node expects a plain string command\nmsg.payload = `sqlcipher ${dbPath} <<< \"${sqlSelect}\"`;\n\nreturn msg;\n",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 1100,
+        "y": 320,
+        "wires": [
+            [
+                "6134fd97b8da736e"
+            ]
+        ]
+    },
+    {
+        "id": "6134fd97b8da736e",
+        "type": "exec",
+        "z": "839bf97956c5212e",
+        "command": "",
+        "addpay": "payload",
+        "append": "",
+        "useSpawn": "false",
+        "timer": "",
+        "winHide": false,
+        "oldrc": false,
+        "name": "Select JWT",
+        "x": 1130,
+        "y": 260,
+        "wires": [
+            [
+                "d995f77d6e3524d0"
+            ],
+            [],
+            []
+        ]
+    },
+    {
+        "id": "d995f77d6e3524d0",
+        "type": "function",
+        "z": "839bf97956c5212e",
+        "name": "Validate JWT and create new",
+        "func": "const fs     = global.get('fs');\nconst jwt    = global.get('jwt');\nconst crypto = global.get('crypto');\n\nconst dbPath    = \"/etc/mosquitto/certs/update_database.db\";\nconst pragmaKey = env.get(\"DB_PASSWORD\");\nconst RENEW_LEEWAY = 60;   // renew when TTL ≤ 60 s\nconst NEW_TTL      = 2700; // 45 minutes\n\nif (!crypto) {\n  node.error(\"crypto module not available in global context\");\n  return null;\n}\n\n// require device name from topic\nif (!msg.device_name) { node.error(\"msg.device_name not set\"); return null; }\n\n// incoming JWT (from payload)\nlet selectedJwt = (msg.payload ?? \"\").toString().trim();\nif (selectedJwt.startsWith('\"') && selectedJwt.endsWith('\"')) {\n  selectedJwt = selectedJwt.slice(1, -1);\n}\n\n// flow values from renew request\nconst deviceId = flow.get(\"renew_device_id\");\nif (!deviceId) { node.error(\"renew_device_id missing\"); return null; }\n\n// helpers\nconst sunnyPub  = fs.readFileSync(\"/etc/mosquitto/certs/sunny-public-key.pem\", \"utf8\");\nconst sunnyPriv = global.get(\"private_key\", \"file\");\nif (!sunnyPriv) { node.error(\"Sunny private key not found in global context\"); return null; }\n\nconst b64urlToJson = (b64u) => {\n  const b64 = b64u.replace(/-/g, '+').replace(/_/g, '/');\n  const pad = (4 - (b64.length % 4)) % 4;\n  return JSON.parse(Buffer.from(b64 + \"=\".repeat(pad), \"base64\").toString(\"utf8\"));\n};\n\nlet claims;\nlet needRenew = false;\n\ntry {\n  // Normal verify (checks signature + exp)\n  claims = jwt.verify(selectedJwt, sunnyPub, { algorithms: [\"ES256\"] });\n\n  // Check TTL\n  const now = Math.floor(Date.now() / 1000);\n  const exp = Number(claims.exp || 0);\n  const ttl = Math.max(0, exp - now);\n\n  if (ttl <= RENEW_LEEWAY) {\n    needRenew = true;\n  } else {\n    node.warn(`JWT is still valid (ttl_seconds=${ttl})`);\n    return null;\n  }\n\n} catch (e) {\n  if (e.name === \"TokenExpiredError\") {\n    try {\n      claims = jwt.verify(selectedJwt, sunnyPub, { algorithms: [\"ES256\"], ignoreExpiration: true });\n      needRenew = true;\n      node.warn(\"JWT expired but signature valid — proceeding to renew.\");\n    } catch (e2) {\n      node.warn(\"JWT verification failed (expired + bad signature): \" + e2.message);\n      return null;\n    }\n  } else {\n    try {\n      const [, payloadPart] = selectedJwt.split(\".\");\n      const decodedClaims = b64urlToJson(payloadPart);\n      if (decodedClaims && decodedClaims.device_id === deviceId) {\n        // key rotation case\n        claims = decodedClaims;\n        needRenew = true;\n        node.warn(\"JWT signature invalid (likely key rotation). device_id matches — renewing with current key.\");\n      } else {\n        node.warn(\"JWT verification failed and device_id mismatch; aborting. Error: \" + e.message);\n        return null;\n      }\n    } catch (decErr) {\n      node.warn(\"JWT decode failed after verify error: \" + decErr.message);\n      return null;\n    }\n  }\n}\n\nif (!needRenew) return null;\n\n// create new token with same claims but new iat & exp\nconst now = Math.floor(Date.now() / 1000);\nconst newClaims = { ...claims, iat: now, exp: now + NEW_TTL };\nconst newJwt    = jwt.sign(newClaims, sunnyPriv, { algorithm: \"ES256\" });\n\n// SIGN (device_id | newJwt)\nlet jwtSigB64;\ntry {\n  const signer = crypto.createSign(\"sha256\");\n  signer.update(`${deviceId}|${newJwt}`);\n  signer.end();\n  jwtSigB64 = signer.sign(sunnyPriv, \"base64\");\n} catch (e) {\n  node.error(\"Failed to sign (device_id|jwt): \" + e.message);\n  return null;\n}\n\n// Update DB\nconst esc = s => (s ?? \"\").toString().replace(/'/g, \"''\");\nconst sqlUpdate = `\nPRAGMA key='${pragmaKey}';\nUPDATE DeviceProfile\nSET jwt_token='${esc(newJwt)}'\nWHERE device_id='${esc(deviceId)}';\n`.trim();\n\nmsg.payload = `sqlcipher ${dbPath} <<< \"${sqlUpdate}\"`;\nnode.warn(`✅ JWT updated for device_id: ${deviceId}`);\n\n// Respond to device\nmsg.topic = `respond/jwt/${msg.device_name}`;\nmsg.mqtt_payload = {\n  device_id:   deviceId,\n  jwt:         newJwt,\n  jwt_sig_b64: jwtSigB64\n};\n\nreturn msg;\n",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 1400,
+        "y": 320,
+        "wires": [
+            [
+                "03d5018c10093867",
+                "8ca6298368c4e5c5"
+            ]
+        ]
+    },
+    {
+        "id": "03d5018c10093867",
+        "type": "change",
+        "z": "839bf97956c5212e",
+        "name": "Set MQTTS Payload to send JWT",
+        "rules": [
+            {
+                "t": "set",
+                "p": "payload",
+                "pt": "msg",
+                "to": "msg.mqtt_payload",
+                "tot": "jsonata"
+            }
+        ],
+        "action": "",
+        "property": "",
+        "from": "",
+        "to": "",
+        "reg": false,
+        "x": 1720,
+        "y": 320,
+        "wires": [
+            [
+                "6e9a43b40cc88337"
+            ]
+        ]
+    },
+    {
+        "id": "8ca6298368c4e5c5",
+        "type": "exec",
+        "z": "839bf97956c5212e",
+        "command": "",
+        "addpay": "payload",
+        "append": "",
+        "useSpawn": "false",
+        "timer": "",
+        "winHide": false,
+        "oldrc": false,
+        "name": "Update JWT",
+        "x": 1430,
+        "y": 240,
+        "wires": [
+            [],
+            [],
+            []
+        ]
+    },
+    {
+        "id": "6e9a43b40cc88337",
+        "type": "mqtt out",
+        "z": "839bf97956c5212e",
+        "name": "Repond new JWT",
+        "topic": "",
+        "qos": "0",
+        "retain": "",
+        "respTopic": "",
+        "contentType": "",
+        "userProps": "",
+        "correl": "",
+        "expiry": "",
+        "broker": "f3cb7dcdae0abc98",
+        "x": 1870,
+        "y": 260,
+        "wires": []
+    },
+    {
+        "id": "c8f20dc2cd7765f1",
+        "type": "comment",
+        "z": "839bf97956c5212e",
+        "name": "Renew request JWT",
+        "info": "",
+        "x": 850,
+        "y": 240,
+        "wires": []
+    },
+    {
+        "id": "195cfa8b0d69ac74",
+        "type": "comment",
+        "z": "839bf97956c5212e",
+        "name": " MQTT Central  Broker (Sunny)",
+        "info": "",
+        "x": 880,
+        "y": 180,
+        "wires": []
+    },
+    {
+        "id": "67a2fddd51cc3957",
+        "type": "inject",
+        "z": "839bf97956c5212e",
+        "name": "Renew JWT",
+        "props": [
+            {
+                "p": "payload"
+            },
+            {
+                "p": "topic",
+                "vt": "str"
+            }
+        ],
+        "repeat": "300",
+        "crontab": "",
+        "once": false,
+        "onceDelay": 0.1,
+        "topic": "",
+        "payload": "",
+        "payloadType": "date",
+        "x": 880,
+        "y": 1160,
+        "wires": [
+            [
+                "2d0d50f6c2aaf36d"
+            ]
+        ]
+    },
+    {
+        "id": "2d0d50f6c2aaf36d",
+        "type": "function",
+        "z": "839bf97956c5212e",
+        "name": "Prepare to Select JWT",
+        "func": "const dbPath = \"/etc/mosquitto/certs/update_database.db\";\nconst pragmaKey = env.get(\"DB_PASSWORD\");\n\n// --- Step 1: Get deviceID from global context ---\nlet deviceID = global.get(\"device_id\", \"file\");\nif (!deviceID) {\n    node.error(\"❌ deviceID not found in global context.\");\n    return null;\n}\n\n// --- Step 2: Escape single quotes ---\ndeviceID = deviceID.replace(/'/g, \"''\");\n\n// --- Step 3: Build SELECT query (only jwt_token) ---\nconst sqlSelect = `\nPRAGMA key = '${pragmaKey}';\nSELECT jwt_token \nFROM DeviceProfile \nWHERE device_id = '${deviceID}';\n`;\n\n// --- Step 4: Send command to exec node ---\nmsg.payload = `sqlcipher ${dbPath} <<< \"${sqlSelect.trim()}\"`;\n\nreturn msg;\n",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 1140,
+        "y": 1200,
+        "wires": [
+            [
+                "4ceb2e6c16fbb544"
+            ]
+        ]
+    },
+    {
+        "id": "4ceb2e6c16fbb544",
+        "type": "exec",
+        "z": "839bf97956c5212e",
+        "command": "",
+        "addpay": "payload",
+        "append": "",
+        "useSpawn": "false",
+        "timer": "",
+        "winHide": false,
+        "oldrc": false,
+        "name": "Select JWT",
+        "x": 1170,
+        "y": 1140,
+        "wires": [
+            [
+                "40f1088daae62afe"
+            ],
+            [],
+            []
+        ]
+    },
+    {
+        "id": "40f1088daae62afe",
+        "type": "function",
+        "z": "839bf97956c5212e",
+        "name": "Validate JWT expire",
+        "func": "// Input: msg.payload = JWT string (may include surrounding quotes from sqlcipher)\n// Output (when ttl < 60): msg.payload = { device_id, jwt }\n\nconst deviceID = global.get(\"device_id\", \"file\");\nif (!deviceID) { node.error(\"deviceID not found in global context\"); return null; }\n\n// 1) Get token string\nlet token = (msg.payload ?? \"\").toString().trim();\n// strip surrounding quotes if present\nif (token.startsWith('\"') && token.endsWith('\"')) token = token.slice(1, -1);\n\n// basic check\nif (!token || !token.includes(\".\")) { node.error(\"Invalid JWT\"); return null; }\n\n// 2) Decode base64url payload\nfunction b64urlToJson(b64u) {\n  const b64 = b64u.replace(/-/g, '+').replace(/_/g, '/');\n  const pad = (4 - (b64.length % 4)) % 4;\n  return JSON.parse(Buffer.from(b64 + \"=\".repeat(pad), \"base64\").toString(\"utf8\"));\n}\n\ntry {\n  const parts = token.split(\".\");\n  if (parts.length < 2) { node.error(\"Malformed JWT\"); return null; }\n  const claims = b64urlToJson(parts[1]);\n\n  const now = Math.floor(Date.now() / 1000);\n  const iat = Number(claims.iat || 0);\n  const exp = Number(claims.exp || 0);\n  const ttl = Math.max(0, exp - now);\n\n  if (!iat || !exp) { node.error(\"JWT missing iat/exp\"); return null; }\n\n  if (ttl < 60) {\n    // need refresh -> pass device_id and token forward\n    msg.payload = { device_id: deviceID, jwt: token };\n    return msg;\n  } else {\n    node.warn(`jwt is still valid (ttl_seconds=${ttl})`);\n    return null; // stop here\n  }\n} catch (e) {\n  node.error(\"Failed to decode JWT: \" + e.message);\n  return null;\n}\n",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 1440,
+        "y": 1200,
+        "wires": [
+            [
+                "c3bc3355c9dcd29a"
+            ]
+        ]
+    },
+    {
+        "id": "c3bc3355c9dcd29a",
+        "type": "mqtt out",
+        "z": "839bf97956c5212e",
+        "name": "Request to renew JWT",
+        "topic": "renew/jwt/sunny",
+        "qos": "0",
+        "retain": "",
+        "respTopic": "",
+        "contentType": "",
+        "userProps": "",
+        "correl": "",
+        "expiry": "",
+        "broker": "d9e12a3558e15ca7",
+        "x": 1700,
+        "y": 1200,
+        "wires": []
+    },
+    {
+        "id": "4f7e919df2c972aa",
+        "type": "mqtt in",
+        "z": "839bf97956c5212e",
+        "name": "Respond new JWT",
+        "topic": "respond/jwt/sunny",
+        "qos": "0",
+        "datatype": "auto-detect",
+        "broker": "d9e12a3558e15ca7",
+        "nl": false,
+        "rap": true,
+        "rh": 0,
+        "inputs": 0,
+        "x": 890,
+        "y": 1380,
+        "wires": [
+            [
+                "e79aae6629cc40ee"
+            ]
+        ]
+    },
+    {
+        "id": "e79aae6629cc40ee",
+        "type": "function",
+        "z": "839bf97956c5212e",
+        "name": "Validate JWT and prepare to update database",
+        "func": "const fs        = global.get('fs');\nconst jwt       = global.get('jwt');\nconst crypto    = global.get('crypto');\n\nconst dbPath    = \"/etc/mosquitto/certs/update_database.db\";\nconst pragmaKey = env.get(\"DB_PASSWORD\");\n\n// --- Step 1: Get incoming payload ---\nconst payload          = msg.payload || {};\nconst incomingDeviceId = payload.device_id;\nconst newJwt           = payload.jwt;\nconst signatureB64     = payload.jwt_sig_b64;    // expecting signature field\n\n// --- Step 2: Get stored deviceId ---\nlet storedDeviceId = global.get(\"device_id\", \"file\");\nif (!storedDeviceId) {\n    node.error(\"❌ deviceID not found in global context\");\n    return null;\n}\n\n// --- Step 3: Compare IDs ---\nif (incomingDeviceId !== storedDeviceId) {\n    node.warn(`❌ Device ID mismatch. Incoming=${incomingDeviceId}, Stored=${storedDeviceId}`);\n    return null;\n}\n\n// --- Step 4: Verify signature over (device_id | jwt) ---\nif (!signatureB64) {\n    node.warn(\"❌ Missing jwt_sig_b64 in payload\");\n    return null;\n}\n\nlet sunnyPub;\ntry {\n    sunnyPub = fs.readFileSync(\"/etc/mosquitto/certs/sunny-public-key.pem\", \"utf8\");\n} catch (e) {\n    node.error(\"❌ Unable to read sunny-public-key.pem: \" + e.message);\n    return null;\n}\n\nconst verify = crypto.createVerify(\"sha256\");\nverify.update(`${incomingDeviceId}|${newJwt}`);\nverify.end();\n\nlet sigOK;\ntry {\n    sigOK = verify.verify(sunnyPub, signatureB64, \"base64\");\n} catch (e) {\n    node.warn(\"❌ Signature verification error: \" + e.message);\n    return null;\n}\n\nif (!sigOK) {\n    node.warn(\"❌ Signature invalid for device_id and jwt.\");\n    return null;\n}\nnode.warn(`✅ Signature verified new JWT come from Sunny for device_id=${incomingDeviceId}`);\n\n// --- Step 5: Escape values for SQL ---\nconst esc = s => (s ?? \"\").toString().replace(/'/g, \"''\");\nconst sqlUpdate = `\nPRAGMA key='${pragmaKey}';\nUPDATE DeviceProfile\nSET jwt_token='${esc(newJwt)}'\nWHERE device_id='${esc(storedDeviceId)}';\n`.trim();\n\n// --- Step 6: Prepare exec payload ---\nmsg.payload = `sqlcipher ${dbPath} <<< \"${sqlUpdate}\"`;\n\nnode.warn(`✅ JWT updated for device_id: ${storedDeviceId}`);\n\nreturn msg;\n",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 1240,
+        "y": 1380,
+        "wires": [
+            [
+                "3013fd010e686818"
+            ]
+        ]
+    },
+    {
+        "id": "3013fd010e686818",
+        "type": "exec",
+        "z": "839bf97956c5212e",
+        "command": "",
+        "addpay": "payload",
+        "append": "",
+        "useSpawn": "false",
+        "timer": "",
+        "winHide": false,
+        "oldrc": false,
+        "name": "Update JWT",
+        "x": 1510,
+        "y": 1320,
+        "wires": [
+            [],
+            [],
+            []
+        ]
+    },
+    {
+        "id": "76cf09ed61413e8e",
+        "type": "comment",
+        "z": "839bf97956c5212e",
+        "name": "Renew JWT",
+        "info": "",
+        "x": 870,
+        "y": 1080,
+        "wires": []
+    },
+    {
+        "id": "617b7251d1060279",
+        "type": "comment",
+        "z": "839bf97956c5212e",
+        "name": "Recieved new JWT",
+        "info": "",
+        "x": 890,
+        "y": 1320,
+        "wires": []
+    },
+    {
+        "id": "7ca35eec79660980",
+        "type": "mqtt in",
+        "z": "839bf97956c5212e",
+        "name": "Revoke MQTTS",
+        "topic": "revoke/MQTTS/sunny",
+        "qos": "0",
+        "datatype": "auto-detect",
+        "broker": "f3cb7dcdae0abc98",
+        "nl": false,
+        "rap": true,
+        "rh": 0,
+        "inputs": 0,
+        "x": 840,
+        "y": 620,
+        "wires": [
+            [
+                "06a872be55aa01c5"
+            ]
+        ]
+    },
+    {
+        "id": "06a872be55aa01c5",
+        "type": "function",
+        "z": "839bf97956c5212e",
+        "name": "Prepare bootstrap to trust CA",
+        "func": "const fs = global.get('fs');\nconst caUrl = msg.payload.ca_url;\nconst fp    = msg.payload.fingerprint;\nconst prov_pass = msg.payload.prov_pass;\nconst MQTTS_CA_Certificate = msg.payload.MQTTS_CA_Certificate;\nconst prov_pass_path = \"/etc/mosquitto/certs/provisioner_password\";\nconst MQTTScertFilePath = \"/etc/mosquitto/certs/MQTTS.pem\";\nfs.writeFileSync(prov_pass_path, prov_pass, 'utf8');\nfs.writeFileSync(MQTTScertFilePath, MQTTS_CA_Certificate, 'utf8');\nif (!caUrl || !fp) {\n  node.error('Missing ca_url or fingerprint in Payload');\n  return null;\n}\n\n// One single line, no line breaks:\nmsg.payload = `step ca bootstrap --ca-url \"${caUrl}\" --fingerprint \"${fp}\" --install --force`;\n\nreturn msg;\n",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 1120,
+        "y": 620,
+        "wires": [
+            [
+                "51e6781435a29424"
+            ]
+        ]
+    },
+    {
+        "id": "51e6781435a29424",
+        "type": "exec",
+        "z": "839bf97956c5212e",
+        "command": "",
+        "addpay": "payload",
+        "append": "",
+        "useSpawn": "false",
+        "timer": "",
+        "winHide": false,
+        "oldrc": false,
+        "name": "Trust CA",
+        "x": 1160,
+        "y": 560,
+        "wires": [
+            [
+                "03b76dcb01d597c6"
+            ],
+            [],
+            []
+        ]
+    },
+    {
+        "id": "03b76dcb01d597c6",
+        "type": "function",
+        "z": "839bf97956c5212e",
+        "name": "Prepare to create MQTTS key and certificate",
+        "func": "\n\n// --- Step 1: File paths ---\nconst certPath = '/etc/mosquitto/certs/jonny.pem';\nconst keyPath = '/etc/mosquitto/certs/jonny-key.pem';\nconst provPassFile = '/etc/mosquitto/certs/provisioner_password';\n\n// --- Step 2: Prepare step-ca command for Exec node ---\nmsg.payload = `step ca certificate jonny \\\n${certPath} \\\n${keyPath} \\\n--san jonny \\\n--san 192.168.153.1 \\\n--provisioner \"Admin JWK\" \\\n--provisioner-password-file ${provPassFile} \\\n--force`;\n\nreturn msg;\n",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 1490,
+        "y": 620,
+        "wires": [
+            [
+                "09b79fb715720c0f"
+            ]
+        ]
+    },
+    {
+        "id": "09b79fb715720c0f",
+        "type": "exec",
+        "z": "839bf97956c5212e",
+        "command": "",
+        "addpay": "payload",
+        "append": "",
+        "useSpawn": "false",
+        "timer": "",
+        "winHide": false,
+        "oldrc": false,
+        "name": "Create MQTTS key and cerificate",
+        "x": 1540,
+        "y": 560,
+        "wires": [
+            [
+                "36a6b9ce5f4127ee"
+            ],
+            [],
+            []
+        ]
+    },
+    {
+        "id": "36a6b9ce5f4127ee",
+        "type": "exec",
+        "z": "839bf97956c5212e",
+        "command": "sudo systemctl restart mosquitto-cert-renew.service | sudo systemctl kill -s HUP mosquitto",
+        "addpay": "",
+        "append": "",
+        "useSpawn": "false",
+        "timer": "",
+        "winHide": false,
+        "oldrc": false,
+        "name": "Restart renew service",
+        "x": 1840,
+        "y": 600,
+        "wires": [
+            [],
+            [],
+            []
+        ]
+    },
+    {
+        "id": "d795d58ce91934f6",
+        "type": "mqtt in",
+        "z": "839bf97956c5212e",
+        "name": "Renew ECC keys",
+        "topic": "renew/ECC/sunny",
+        "qos": "0",
+        "datatype": "auto-detect",
+        "broker": "d9e12a3558e15ca7",
+        "nl": false,
+        "rap": true,
+        "rh": 0,
+        "inputs": 0,
+        "x": 820,
+        "y": 880,
+        "wires": [
+            [
+                "dce57b31bf4a4d18"
+            ]
+        ]
+    },
+    {
+        "id": "dce57b31bf4a4d18",
+        "type": "function",
+        "z": "839bf97956c5212e",
+        "name": "Match ID",
+        "func": "// === Step 1: Get stored device_id from global ===\nconst storedDeviceId = global.get(\"device_id\", \"file\");   // from global.set(..., 'file')\nnode.warn(storedDeviceId);\n// === Step 2: Get incoming device_id ===\nconst incomingDeviceId = msg.payload.device_id;\n\n// === Step 3: Compare ===\nif (storedDeviceId && incomingDeviceId && storedDeviceId === incomingDeviceId) {\n    // ✅ IDs match\n    const deviceName = msg.payload.device_name || \"unknown\";\n    flow.set('deviceName', deviceName);\n    const privateKeyPath = `/etc/mosquitto/certs/${deviceName}-private-key.pem`;\n\n    // Exec node needs plain string\n    msg.payload = `openssl ecparam -genkey -name prime256v1 -out ${privateKeyPath}`;\n\n    return msg;\n} else {\n    node.warn(`❌ Device ID mismatch! Stored=${storedDeviceId}, Incoming=${incomingDeviceId}`);\n    return null;\n}\n",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 1020,
+        "y": 880,
+        "wires": [
+            [
+                "3d060939434db2a4"
+            ]
+        ]
+    },
+    {
+        "id": "3d060939434db2a4",
+        "type": "exec",
+        "z": "839bf97956c5212e",
+        "command": "",
+        "addpay": "payload",
+        "append": "",
+        "useSpawn": "false",
+        "timer": "",
+        "winHide": false,
+        "oldrc": false,
+        "name": "Sunny private key creation",
+        "x": 1260,
+        "y": 880,
+        "wires": [
+            [
+                "d7464ec190d213c0"
+            ],
+            [],
+            []
+        ]
+    },
+    {
+        "id": "c9981908078385b2",
+        "type": "exec",
+        "z": "839bf97956c5212e",
+        "command": "",
+        "addpay": "payload",
+        "append": "",
+        "useSpawn": "false",
+        "timer": "",
+        "winHide": false,
+        "oldrc": false,
+        "name": "Insert Data Into Keys Table",
+        "x": 1740,
+        "y": 800,
+        "wires": [
+            [],
+            [],
+            []
+        ]
+    },
+    {
+        "id": "f5fd772ac544c040",
+        "type": "change",
+        "z": "839bf97956c5212e",
+        "name": "Set MQTTS Payload to sync database",
+        "rules": [
+            {
+                "t": "set",
+                "p": "payload",
+                "pt": "msg",
+                "to": "msg.mqtt_payload",
+                "tot": "jsonata"
+            }
+        ],
+        "action": "",
+        "property": "",
+        "from": "",
+        "to": "",
+        "reg": false,
+        "x": 1770,
+        "y": 960,
+        "wires": [
+            [
+                "cc2b844377241292"
+            ]
+        ]
+    },
+    {
+        "id": "cc2b844377241292",
+        "type": "mqtt out",
+        "z": "839bf97956c5212e",
+        "name": "Sync Keys Table",
+        "topic": "sync/data/keys_",
+        "qos": "0",
+        "retain": "",
+        "respTopic": "",
+        "contentType": "",
+        "userProps": "",
+        "correl": "",
+        "expiry": "",
+        "broker": "873502a2020d1559",
+        "x": 2020,
+        "y": 880,
+        "wires": []
+    },
+    {
+        "id": "0a3556864970b2b1",
+        "type": "function",
+        "z": "839bf97956c5212e",
+        "name": "Read keys and prepare data for Keys Table",
+        "func": "// --- Simple combined function ---\n// 1) Read files -> put in global\n// 2) Build SQL -> put string cmd into msg.payload\n\nconst fs = global.get('fs');\nif (!fs) { node.error(\"fs not found in global (set with global.set('fs', require('fs')) )\"); return null; }\n\nconst dbPath     = \"/etc/mosquitto/certs/update_database.db\";\nconst pragmaKey  = env.get(\"DB_PASSWORD\");\nif (!pragmaKey) { node.error(\"DB_PASSWORD env not set\"); return null; }\n\n// === Paths ===\nconst publicKeyPath  = \"/etc/mosquitto/certs/sunny-public-key.pem\";\nconst privateKeyPath = \"/etc/mosquitto/certs/sunny-private-key.pem\";\n\n\n// --- Step 1: Read PEMs and store to global ---\nlet publicKey, privateKey;\ntry {\n  publicKey  = fs.readFileSync(publicKeyPath, 'utf8').trim();\n  privateKey = fs.readFileSync(privateKeyPath, 'utf8').trim();\n} catch (e) {\n  node.error(\"Read PEM failed: \" + e.message);\n  return null;\n}\nglobal.set(\"public_key\",  publicKey,  \"file\");\nglobal.set(\"private_key\", privateKey, \"file\");\n\n// --- Step 2: Get deviceID (already set elsewhere) ---\nconst deviceID = global.get(\"device_id\", \"file\");\nif (!deviceID) { node.error(\"deviceID not found in global context\"); return null; }\n\n\n\n// --- Step 4: Build SQL (escape single quotes in PEMs) ---\nconst esc = s => s.replace(/'/g, \"''\");\nconst sql = `\nPRAGMA key='${pragmaKey}';\nINSERT OR REPLACE INTO Keys (device_id, private_key, public_key, registration_key)\nVALUES ('${esc(deviceID)}', '${esc(privateKey)}', '${esc(publicKey)}', NULL);\n`.trim();\nconst deviceName=flow.get('deviceName');\n// --- Step 5: Prepare exec command (must be a plain string) ---\nmsg.payload = `sqlcipher ${dbPath} <<< \"${sql}\"`;\n\n// (Optional) also attach MQTT payload\nmsg.mqtt_payload = {\n    device_id: deviceID,\n    devicename:deviceName,\n    public_key: publicKey\n    // Optionally, use Base64 instead: secretKeyBuffer.toString('base64')\n};\nreturn msg;\n",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 1670,
+        "y": 880,
+        "wires": [
+            [
+                "c9981908078385b2",
+                "f5fd772ac544c040"
+            ]
+        ]
+    },
+    {
+        "id": "8f4e4067cd2158bb",
+        "type": "comment",
+        "z": "839bf97956c5212e",
+        "name": "Revoke MQTTS Certs and Key",
+        "info": "",
+        "x": 890,
+        "y": 560,
+        "wires": []
+    },
+    {
+        "id": "dd76a64a2e723499",
+        "type": "comment",
+        "z": "839bf97956c5212e",
+        "name": "Renew Keys",
+        "info": "",
+        "x": 810,
+        "y": 800,
+        "wires": []
+    },
+    {
+        "id": "d7464ec190d213c0",
+        "type": "exec",
+        "z": "839bf97956c5212e",
+        "command": " sudo openssl ec -in  /etc/mosquitto/certs/sunny-private-key.pem -pubout -out /etc/mosquitto/certs/sunny-public-key.pem",
+        "addpay": "",
+        "append": "",
+        "useSpawn": "false",
+        "timer": "",
+        "winHide": false,
+        "oldrc": false,
+        "name": "Create Sunny Public Key ",
+        "x": 1270,
+        "y": 800,
+        "wires": [
+            [
+                "0a3556864970b2b1"
+            ],
+            [],
+            []
+        ]
+    },
+    {
+        "id": "e41b3b41a1abc296",
+        "type": "mqtt in",
+        "z": "839bf97956c5212e",
+        "name": "Renew JWT",
+        "topic": "renew/JWT/sunny",
+        "qos": "0",
+        "datatype": "auto-detect",
+        "broker": "f3cb7dcdae0abc98",
+        "nl": false,
+        "rap": true,
+        "rh": 0,
+        "inputs": 0,
+        "x": 870,
+        "y": 1220,
+        "wires": [
+            [
+                "2d0d50f6c2aaf36d"
+            ]
+        ]
+    },
+    {
+        "id": "5984e48bdc7f9b15",
+        "type": "function",
+        "z": "839bf97956c5212e",
+        "name": "Validate JWT and create new",
+        "func": "\nconst fs = global.get('fs');\nconst jwt = global.get('jwt');\n\nconst dbPath = \"/etc/mosquitto/certs/update_database.db\";\nconst pragmaKey = env.get(\"DB_PASSWORD\");\nconst RENEW_LEEWAY = 60;   // renew when TTL <= 60s\nconst NEW_TTL = 2700;   // 45 minutes\n\n// require device name from topic split\nif (!msg.device_name) { node.error(\"msg.device_name not set\"); return null; }\n\n// selected JWT (from SQLCipher)\nlet selectedJwt = (msg.payload ?? \"\").toString().trim();\nif (selectedJwt.startsWith('\"') && selectedJwt.endsWith('\"')) selectedJwt = selectedJwt.slice(1, -1);\n\n// flow values from renew request\nconst renewJwt = flow.get(\"renew_jwt\");\nconst deviceId = flow.get(\"renew_device_id\");\nif (!renewJwt || !deviceId) { node.error(\"renew_jwt or renew_device_id missing\"); return null; }\n\n// must match request\nif (selectedJwt !== renewJwt) { node.warn(\"Selected JWT does not match renew_jwt\"); return null; }\n\n// helpers\nconst sunnyPub = fs.readFileSync(\"/etc/mosquitto/certs/sunny-public-key.pem\", \"utf8\");\nconst sunnyPriv = global.get(\"private_key\", \"file\");\nif (!sunnyPriv) { node.error(\"Sunny private key not found in global context\"); return null; }\n\nconst b64urlToJson = (b64u) => {\n  const b64 = b64u.replace(/-/g, '+').replace(/_/g, '/');\n  const pad = (4 - (b64.length % 4)) % 4;\n  return JSON.parse(Buffer.from(b64 + \"=\".repeat(pad), \"base64\").toString(\"utf8\"));\n};\n\nlet claims;\nlet needRenew = false;\n\ntry {\n  // Normal verify (checks signature + exp)\n  claims = jwt.verify(selectedJwt, sunnyPub, { algorithms: [\"ES256\"] });\n\n  // Not expired → check TTL\n  const now = Math.floor(Date.now() / 1000);\n  const exp = Number(claims.exp || 0);\n  const ttl = Math.max(0, exp - now);\n\n  if (ttl <= RENEW_LEEWAY) needRenew = true;\n  else { node.warn(`jwt is still valid (ttl_seconds=${ttl})`); return null; }\n\n} catch (e) {\n  if (e.name === \"TokenExpiredError\") {\n    // expired → confirm signature ignoring exp\n    try {\n      claims = jwt.verify(selectedJwt, sunnyPub, { algorithms: [\"ES256\"], ignoreExpiration: true });\n      needRenew = true;\n      node.warn(\"JWT expired but signature valid — proceeding to renew.\");\n    } catch (e2) {\n      node.warn(\"JWT verification failed (expired + bad signature): \" + e2.message);\n      return null;\n    }\n  } else {\n    // OTHER verification errors (e.g., invalid signature) → handle rotation case\n    // decode WITHOUT verifying to inspect claims.device_id\n    try {\n      const [, payloadPart] = selectedJwt.split(\".\");\n      const decodedClaims = b64urlToJson(payloadPart);\n      if (decodedClaims && decodedClaims.device_id === deviceId) {\n        // treat as signing-key rotation: allow renewal using current Sunny private key\n        claims = decodedClaims;\n        needRenew = true;\n        node.warn(\"JWT signature invalid (likely key rotation). device_id matches — renewing with current key.\");\n      } else {\n        node.warn(\"JWT verification failed and device_id mismatch; aborting. Error: \" + e.message);\n        return null;\n      }\n    } catch (decErr) {\n      node.warn(\"JWT decode failed after verify error: \" + decErr.message);\n      return null;\n    }\n  }\n}\n\nif (!needRenew) return null;\n\n// create new token with SAME claims, but set iat = now and exp = now + NEW_TTL\nconst now = Math.floor(Date.now() / 1000);\nconst newClaims = { ...claims, iat: now, exp: now + NEW_TTL };\n\nconst newJwt = jwt.sign(newClaims, sunnyPriv, { algorithm: \"ES256\" });\n\n// update DB\nconst esc = s => (s ?? \"\").toString().replace(/'/g, \"''\");\nconst sqlUpdate = `\nPRAGMA key='${pragmaKey}';\nUPDATE DeviceProfile\nSET jwt_token='${esc(newJwt)}'\nWHERE device_id='${esc(deviceId)}';\n`.trim();\n\nmsg.payload = `sqlcipher ${dbPath} <<< \"${sqlUpdate}\"`;\nnode.warn(`✅ JWT updated for device_id: ${deviceId}`);\n// respond to device\nmsg.topic = `respond/jwt/${msg.device_name}`;\nmsg.mqtt_payload = { device_id: deviceId, jwt: newJwt };\n\nreturn msg;\n",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 1720,
+        "y": 400,
+        "wires": [
+            []
+        ]
+    },
+    {
+        "id": "f3cb7dcdae0abc98",
+        "type": "mqtt-broker",
+        "name": "",
+        "broker": "192.168.151.1",
+        "port": "8883",
+        "tls": "ad608835603db99b",
+        "clientid": "",
+        "autoConnect": true,
+        "usetls": true,
+        "protocolVersion": "4",
+        "keepalive": "60",
+        "cleansession": true,
+        "autoUnsubscribe": true,
+        "birthTopic": "",
+        "birthQos": "0",
+        "birthRetain": "false",
+        "birthPayload": "",
+        "birthMsg": {},
+        "closeTopic": "",
+        "closeQos": "0",
+        "closeRetain": "false",
+        "closePayload": "",
+        "closeMsg": {},
+        "willTopic": "",
+        "willQos": "0",
+        "willRetain": "false",
+        "willPayload": "",
+        "willMsg": {},
+        "userProps": "",
+        "sessionExpiry": ""
+    },
+    {
+        "id": "d9e12a3558e15ca7",
+        "type": "mqtt-broker",
+        "name": "",
+        "broker": "192.168.151.1",
+        "port": "8883",
+        "tls": "565b77223a05cca1",
+        "clientid": "",
+        "autoConnect": true,
+        "usetls": true,
+        "protocolVersion": "4",
+        "keepalive": "60",
+        "cleansession": true,
+        "autoUnsubscribe": true,
+        "birthTopic": "",
+        "birthQos": "0",
+        "birthRetain": "false",
+        "birthPayload": "",
+        "birthMsg": {},
+        "closeTopic": "",
+        "closeQos": "0",
+        "closeRetain": "false",
+        "closePayload": "",
+        "closeMsg": {},
+        "willTopic": "",
+        "willQos": "0",
+        "willRetain": "false",
+        "willPayload": "",
+        "willMsg": {},
+        "userProps": "",
+        "sessionExpiry": ""
+    },
+    {
+        "id": "873502a2020d1559",
+        "type": "mqtt-broker",
+        "name": "",
+        "broker": "192.168.151.1",
+        "port": "1883",
+        "clientid": "",
+        "autoConnect": true,
+        "usetls": false,
+        "protocolVersion": "4",
+        "keepalive": "60",
+        "cleansession": true,
+        "autoUnsubscribe": true,
+        "birthTopic": "",
+        "birthQos": "0",
+        "birthRetain": "false",
+        "birthPayload": "",
+        "birthMsg": {},
+        "closeTopic": "",
+        "closeQos": "0",
+        "closeRetain": "false",
+        "closePayload": "",
+        "closeMsg": {},
+        "willTopic": "",
+        "willQos": "0",
+        "willRetain": "false",
+        "willPayload": "",
+        "willMsg": {},
+        "userProps": "",
+        "sessionExpiry": ""
+    },
+    {
+        "id": "ad608835603db99b",
+        "type": "tls-config",
+        "name": "",
+        "cert": "/etc/mosquitto/certs/sunny.pem",
+        "key": "/etc/mosquitto/certs/sunny-key.pem",
+        "ca": "/etc/mosquitto/certs/MQTTS.pem",
+        "certname": "",
+        "keyname": "",
+        "caname": "",
+        "servername": "sunny",
+        "verifyservercert": true,
+        "alpnprotocol": ""
+    },
+    {
+        "id": "565b77223a05cca1",
+        "type": "tls-config",
+        "name": "",
+        "cert": "/etc/mosquitto/certs/sunny.pem",
+        "key": "/etc/mosquitto/certs/sunny-key.pem",
+        "ca": "/etc/mosquitto/certs/MQTTS.pem",
+        "certname": "",
+        "keyname": "",
+        "caname": "",
+        "servername": "sunny",
+        "verifyservercert": true,
+        "alpnprotocol": ""
+    }
+]
