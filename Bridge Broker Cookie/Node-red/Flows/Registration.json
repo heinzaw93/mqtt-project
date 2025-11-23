@@ -1,0 +1,502 @@
+[
+    {
+        "id": "7b85b502d1474e1f",
+        "type": "tab",
+        "label": "Registration",
+        "disabled": false,
+        "info": "",
+        "env": []
+    },
+    {
+        "id": "c4647688a76b54d8",
+        "type": "exec",
+        "z": "7b85b502d1474e1f",
+        "command": "openssl ecparam -genkey -name prime256v1 -out /etc/mosquitto/certs/cookie-private-key.pem",
+        "addpay": "",
+        "append": "",
+        "useSpawn": "false",
+        "timer": "",
+        "winHide": false,
+        "oldrc": false,
+        "name": "Cookie private key creation",
+        "x": 640,
+        "y": 300,
+        "wires": [
+            [
+                "f497f4eda60628ad"
+            ],
+            [],
+            []
+        ]
+    },
+    {
+        "id": "f497f4eda60628ad",
+        "type": "exec",
+        "z": "7b85b502d1474e1f",
+        "command": "openssl ec -in /etc/mosquitto/certs/cookie-private-key.pem -pubout -out /etc/mosquitto/certs/cookie-public-key.pem",
+        "addpay": "",
+        "append": "",
+        "useSpawn": "false",
+        "timer": "",
+        "winHide": false,
+        "oldrc": false,
+        "name": "Cookie public key creation",
+        "x": 670,
+        "y": 220,
+        "wires": [
+            [
+                "6a8fe9a959f4f6d4"
+            ],
+            [],
+            []
+        ]
+    },
+    {
+        "id": "316d998a8375baf5",
+        "type": "mqtt in",
+        "z": "7b85b502d1474e1f",
+        "name": "Subscribe Sunny Public Key",
+        "topic": "keys/registration/cookie",
+        "qos": "0",
+        "datatype": "auto-detect",
+        "broker": "873502a2020d1559",
+        "nl": false,
+        "rap": true,
+        "rh": 0,
+        "inputs": 0,
+        "x": 400,
+        "y": 460,
+        "wires": [
+            [
+                "971d951ae9de9be4"
+            ]
+        ]
+    },
+    {
+        "id": "2ddeced6db8e0bfe",
+        "type": "function",
+        "z": "7b85b502d1474e1f",
+        "name": "Prepare Data for Registration",
+        "func": "const fs = global.get('fs');\nconst crypto = global.get('crypto');\nconst os = global.get('os');\n\ntry {\n    const device_name = \"cookie\";  // ✅ Set device name\n    flow.set('device_name', device_name);  // ✅ Store in flow context\n\n    // ✅ Step 1: Get MAC Addresses from wireless interfaces only\n    const networkInterfaces = os.networkInterfaces();\n    let macAddresses = [];\n\n    for (let iface in networkInterfaces) {\n        if (iface.startsWith('wlan') || iface.startsWith('wlx')) {\n            networkInterfaces[iface].forEach((detail) => {\n                if (detail.mac && !macAddresses.includes(detail.mac)) {\n                    macAddresses.push(detail.mac);\n                    node.log(`🟢 MAC Address Found on ${iface}: ${detail.mac}`);\n                }\n            });\n        }\n    }\n\n    const macAddress1 = macAddresses[0] || \"00:00:00:00:00:00\";\n    const macAddress2 = macAddresses[1] || \"00:00:00:00:00:00\";\n\n    flow.set('macAddress1', macAddress1);\n    flow.set('macAddress2', macAddress2);\n\n    \n    // ✅ Step 3: Prepare Data for Signing\n    const dataToSign = `${macAddresses.join(',')}|${device_name}`;\n\n    // ✅ Step 4: Sign the Data using ECDSA\n    const privateKeyPath = '/etc/mosquitto/certs/cookie-private-key.pem';\n    const privateKeyPEM = fs.readFileSync(privateKeyPath, 'utf8');\n    const signer = crypto.createSign('sha256');\n    signer.update(dataToSign);\n    signer.end();\n    const signature = signer.sign(privateKeyPEM, 'base64');\n\n    // ✅ Step 5: Generate AES Key from existing secret key file\n    const secretKeyPath = '/etc/mosquitto/certs/cookie-registration-secret-key.bin';\n    const secretKeyBin = fs.readFileSync(secretKeyPath);  // Direct binary read\n    const aesKey = crypto.createHash('sha256').update(secretKeyBin).digest();\n\n    // ✅ Step 6: Encrypt sensitive payload\n    const iv = crypto.randomBytes(16);\n    const cipher = crypto.createCipheriv('aes-256-cbc', aesKey, iv);\n\n    const sensitivePayload = JSON.stringify({\n        device_name,\n        macAddresses,\n     \n    });\n\n    let encrypted = cipher.update(sensitivePayload, 'utf8', 'hex');\n    encrypted += cipher.final('hex');\n\n    // ✅ Step 7: Final MQTT Payload\n    msg.payload = {\n        encryptedData: encrypted,\n        iv: iv.toString('hex'),\n        sign: signature\n    };\n\n    // ✅ Logging\n    //node.warn(`Data to Sign: ${dataToSign}`);\n   // node.warn(`Signature: ${signature}`);\n   // node.warn(`Encrypted Data Length: ${encrypted.length}`);\n\n\n    return msg;\n} catch (err) {\n    node.error(`Error: ${err.message}`);\n    return null;\n}\n",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 1360,
+        "y": 460,
+        "wires": [
+            [
+                "adec2e0c95a563fd"
+            ]
+        ]
+    },
+    {
+        "id": "adec2e0c95a563fd",
+        "type": "mqtt out",
+        "z": "7b85b502d1474e1f",
+        "name": "Publish Registration Request",
+        "topic": "registration/request/cookie",
+        "qos": "1",
+        "retain": "",
+        "respTopic": "",
+        "contentType": "",
+        "userProps": "",
+        "correl": "",
+        "expiry": "",
+        "broker": "873502a2020d1559",
+        "x": 1640,
+        "y": 460,
+        "wires": []
+    },
+    {
+        "id": "81a92e86cd0aac1e",
+        "type": "function",
+        "z": "7b85b502d1474e1f",
+        "name": "Decrypt the Registration respond",
+        "func": "const fs = global.get('fs');\nconst crypto = global.get('crypto');\n\n// --- File paths ---\nconst MQTTScertFilePath = \"/etc/mosquitto/certs/MQTTS.pem\";\nconst prov_pass_path = \"/etc/mosquitto/certs/provisioner_password\";\nconst secretKeyPath = \"/etc/mosquitto/certs/cookie-registration-secret-key.bin\";\n\n// --- Read Jonny's AES-256 secret key (binary) ---\nconst secretKEYPEM = fs.readFileSync(secretKeyPath);\n\n// --- Extract encrypted payload from MQTT ---\nconst { encryptedData, iv, sign } = msg.payload;\n\n// --- Derive AES key from secret ---\nconst aesKey = crypto.createHash('sha256').update(secretKEYPEM).digest();\n\n// --- Decrypt AES-256-CBC payload ---\nconst decipher = crypto.createDecipheriv('aes-256-cbc', aesKey, Buffer.from(iv, 'hex'));\nlet decrypted = decipher.update(encryptedData, 'hex', 'utf8');\ndecrypted += decipher.final('utf8');\n\n// --- Parse JSON content from decrypted payload ---\nconst decryptedData = JSON.parse(decrypted);\n//node.warn(decryptedData);\n\n// --- Extract Sunny's public key from payload ---\nconst sunnyPublicKey = decryptedData.sunnyPublicKey;\n\n// --- Recreate signed content for verification ---\nconst dataToVerify = `${decryptedData.deviceID}|${decryptedData.MQTTS_CA_Certificate}|${decryptedData.fingerprint}|${decryptedData.ca_url}|${decryptedData.prov_pass}|${decryptedData.jwt}|${decryptedData.registered_at}|${sunnyPublicKey}|${decryptedData.is_broker}`;\n\n// --- ECDSA Signature Verification ---\nconst verifier = crypto.createVerify('sha256');\nverifier.update(dataToVerify);\nverifier.end();\n//node.warn(verifier);\n\nconst isVerified = verifier.verify(sunnyPublicKey, sign, 'base64');\nif (!isVerified) {\n    node.error(\"❌ Signature verification failed! Possible data tampering.\");\n    return null;\n}\n\n// --- Retrieve MAC addresses and device name from flow context ---\nconst macAddress1 = flow.get('macAddress1') || \"00:00:00:00:00:00\";\nconst macAddress2 = flow.get('macAddress2') || \"00:00:00:00:00:00\";\nconst deviceName = flow.get('device_name') || \"unknown\";\n\n// --- Store only device ID, CA finger print and URl in global context (optional) ---\nglobal.set('deviceID', decryptedData.deviceID, 'file');\nglobal.set('fingerprint',decryptedData.fingerprint, 'file');\nglobal.set('ca_url', decryptedData.ca_url, 'file');\n// --- Save received certs to disk ---\nfs.writeFileSync(MQTTScertFilePath, decryptedData.MQTTS_CA_Certificate, 'utf8');\nfs.writeFileSync(\"/etc/mosquitto/certs/sunny-public-key.pem\", sunnyPublicKey, 'utf8');\nfs.writeFileSync(prov_pass_path, decryptedData.prov_pass, 'utf8');\n// --- SQLCipher: Insert into DeviceProfile ---\nconst dbPath = \"/etc/mosquitto/certs/update_database.db\";\nconst pragmaKey = env.get(\"DB_PASSWORD\");\n\n// Escape single quotes in JWT for safe SQL\nconst escapedJwt = decryptedData.jwt.replace(/'/g, \"''\");\n\n// --- Construct SQL INSERT ---\nconst sqlInsert = `\nPRAGMA key = '${pragmaKey}';\nINSERT OR REPLACE INTO DeviceProfile (\n    device_id, device_name, mac_address_1, mac_address_2, jwt_token, is_broker, authentication_status, registered_at\n)\nVALUES (\n    '${decryptedData.deviceID}', '${deviceName}', '${macAddress1}', '${macAddress2}', '${escapedJwt}', ${decryptedData.is_broker}, NULL, ${decryptedData.registered_at}\n);\n`;\n\n// --- Output for exec node ---\nmsg.payload = `sqlcipher ${dbPath} <<< \"${sqlInsert.trim()}\"`;\n\nreturn msg;\n",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 640,
+        "y": 580,
+        "wires": [
+            [
+                "2df7b1c2b3902b5f"
+            ]
+        ]
+    },
+    {
+        "id": "e47ffcc2bfeed2d8",
+        "type": "comment",
+        "z": "7b85b502d1474e1f",
+        "name": "Create Jonny public/private key",
+        "info": "",
+        "x": 430,
+        "y": 160,
+        "wires": []
+    },
+    {
+        "id": "08ce08fc714f0d18",
+        "type": "comment",
+        "z": "7b85b502d1474e1f",
+        "name": "Create registration secret key and publish registration request payload to central broker",
+        "info": "\n\n\n",
+        "x": 580,
+        "y": 400,
+        "wires": []
+    },
+    {
+        "id": "6f41c67ddfc60f94",
+        "type": "comment",
+        "z": "7b85b502d1474e1f",
+        "name": "Subscribe registration respond to insert device profile and keys table data into database",
+        "info": "",
+        "x": 580,
+        "y": 520,
+        "wires": []
+    },
+    {
+        "id": "2df7b1c2b3902b5f",
+        "type": "exec",
+        "z": "7b85b502d1474e1f",
+        "command": "",
+        "addpay": "payload",
+        "append": "",
+        "useSpawn": "false",
+        "timer": "",
+        "winHide": false,
+        "oldrc": false,
+        "name": "Insert  Data Into Device Profile Data",
+        "x": 700,
+        "y": 660,
+        "wires": [
+            [
+                "abb7b1f4529995be"
+            ],
+            [],
+            []
+        ]
+    },
+    {
+        "id": "8736074278c9d15e",
+        "type": "mqtt in",
+        "z": "7b85b502d1474e1f",
+        "name": "Registration Respond",
+        "topic": "registration/respond/cookie",
+        "qos": "0",
+        "datatype": "auto-detect",
+        "broker": "873502a2020d1559",
+        "nl": false,
+        "rap": true,
+        "rh": 0,
+        "inputs": 0,
+        "x": 380,
+        "y": 640,
+        "wires": [
+            [
+                "81a92e86cd0aac1e"
+            ]
+        ]
+    },
+    {
+        "id": "6a8fe9a959f4f6d4",
+        "type": "function",
+        "z": "7b85b502d1474e1f",
+        "name": "Set Keys In global context",
+        "func": "const fs = global.get('fs');\n\n// --- Key paths ---\nconst publicKeyPath = \"/etc/mosquitto/certs/cookie-public-key.pem\";\nconst privateKeyPath = \"/etc/mosquitto/certs/cookie-private-key.pem\";\n\n// --- Step 1: Read keys ---\nconst publicKey = fs.readFileSync(publicKeyPath, 'utf8').trim();\nconst privateKey = fs.readFileSync(privateKeyPath, 'utf8').trim();\n\n// --- Step 2: Store in global context ---\nglobal.set(\"public_key\", publicKey, \"file\");\nglobal.set(\"private_key\", privateKey, \"file\");\n\n// --- Step 3: Prepare payload for MQTT transmission ---\nmsg.payload = publicKey;\n\nreturn msg;\n",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 930,
+        "y": 240,
+        "wires": [
+            [
+                "8865cf7dd81ffba2"
+            ]
+        ]
+    },
+    {
+        "id": "abb7b1f4529995be",
+        "type": "function",
+        "z": "7b85b502d1474e1f",
+        "name": "Prepare data for Keys Table",
+        "func": "const fs = global.get('fs');\n\n// --- Step 1: Define paths ---\nconst secretKeyPath = \"/etc/mosquitto/certs/cookie-registration-secret-key.bin\";\nconst dbPath = \"/etc/mosquitto/certs/update_database.db\";\nconst pragmaKey = env.get(\"DB_PASSWORD\");\n\n// --- Step 2: Initialize key data ---\nlet deviceID;\nlet privateKey;\nlet publicKey;\nlet attempts = 0;\n\n// --- Step 3: Retry fetching global context (file scope) ---\nwhile ((!deviceID || !privateKey || !publicKey) && attempts < 5) {\n    if (!deviceID) deviceID = global.get(\"deviceID\", \"file\");\n    if (!privateKey) privateKey = global.get(\"private_key\", \"file\");\n    if (!publicKey) publicKey = global.get(\"public_key\", \"file\");\n\n    if (!deviceID || !privateKey || !publicKey) {\n        node.warn(\"Retrying retrieval of key data from global context...\");\n        attempts++;\n        const waitUntil = Date.now() + 200;\n        while (Date.now() < waitUntil); // busy-wait\n    }\n}\n\n// --- Step 4: Handle missing data ---\nif (!deviceID || !publicKey || !privateKey) {\n    node.error(\"❌ deviceID, publicKey, or privateKey not found in global context!\");\n    return null;\n}\n\n// --- Step 5: Read and hex-encode registration key (raw binary → BLOB) ---\nlet secretKeyBuffer;\ntry {\n    secretKeyBuffer = fs.readFileSync(secretKeyPath); // Raw binary\n} catch (err) {\n    node.error(\"❌ Failed to read registration secret key: \" + err.message);\n    return null;\n}\nconst secretKeyHex = secretKeyBuffer.toString('hex'); // Convert to hex string\n\n// --- Step 6: Prepare SQL INSERT for Keys table ---\nconst sqlInsert = `\nPRAGMA key = '${pragmaKey}';\nINSERT OR REPLACE INTO Keys (device_id, private_key, public_key, registration_key)\nVALUES ('${deviceID}', '${privateKey}', '${publicKey}', X'${secretKeyHex}');\n`;\n\nmsg.payload = `sqlcipher ${dbPath} <<< \"${sqlInsert.trim()}\"`;\n\n\nreturn msg;\n",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 1000,
+        "y": 580,
+        "wires": [
+            [
+                "57f30eb6d8e2a123"
+            ]
+        ]
+    },
+    {
+        "id": "57f30eb6d8e2a123",
+        "type": "exec",
+        "z": "7b85b502d1474e1f",
+        "command": "",
+        "addpay": "payload",
+        "append": "",
+        "useSpawn": "false",
+        "timer": "",
+        "winHide": false,
+        "oldrc": false,
+        "name": "Insert Data Into Keys Table",
+        "x": 1040,
+        "y": 660,
+        "wires": [
+            [
+                "eaed738d1ef32756"
+            ],
+            [],
+            []
+        ]
+    },
+    {
+        "id": "971d951ae9de9be4",
+        "type": "function",
+        "z": "7b85b502d1474e1f",
+        "name": "Prepare to create Registration Secret Key",
+        "func": "const fs = global.get('fs');\n\n// --- Step 1: File paths ---\nconst publicKey = msg.payload.public_key;  // PEM format string\nconst publicKeyPath = '/etc/mosquitto/certs/sunny-public-key.pem';\nconst privateKeyPath = '/etc/mosquitto/certs/cookie-private-key.pem';\nconst secretKeyPath = '/etc/mosquitto/certs/cookie-registration-secret-key.bin';\n\n// --- Step 2: Write Sunny's public key to file ---\nfs.writeFileSync(publicKeyPath, publicKey, 'utf8');\nnode.log(`✅ Public key saved to ${publicKeyPath}`);\n\n// --- Step 3: Prepare OpenSSL command for Exec node ---\nmsg.payload = `openssl pkeyutl -derive -inkey ${privateKeyPath} -peerkey ${publicKeyPath} -out ${secretKeyPath}`;\n\nreturn msg;\n",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 720,
+        "y": 460,
+        "wires": [
+            [
+                "feda3061f449ad34"
+            ]
+        ]
+    },
+    {
+        "id": "feda3061f449ad34",
+        "type": "exec",
+        "z": "7b85b502d1474e1f",
+        "command": "",
+        "addpay": "payload",
+        "append": "",
+        "useSpawn": "false",
+        "timer": "",
+        "winHide": false,
+        "oldrc": false,
+        "name": "Create Registration Secret Key",
+        "x": 1050,
+        "y": 460,
+        "wires": [
+            [
+                "2ddeced6db8e0bfe"
+            ],
+            [],
+            []
+        ]
+    },
+    {
+        "id": "8865cf7dd81ffba2",
+        "type": "mqtt out",
+        "z": "7b85b502d1474e1f",
+        "name": "Publish Cookie Public Key",
+        "topic": "keys/public key/cookie",
+        "qos": "1",
+        "retain": "",
+        "respTopic": "",
+        "contentType": "",
+        "userProps": "",
+        "correl": "",
+        "expiry": "",
+        "broker": "873502a2020d1559",
+        "x": 1230,
+        "y": 260,
+        "wires": []
+    },
+    {
+        "id": "ada737ecd7d3557e",
+        "type": "comment",
+        "z": "7b85b502d1474e1f",
+        "name": "MQTT Bridge Broker (Cookie)",
+        "info": "",
+        "x": 420,
+        "y": 120,
+        "wires": []
+    },
+    {
+        "id": "a86e7b17bdbf41fd",
+        "type": "inject",
+        "z": "7b85b502d1474e1f",
+        "name": "",
+        "props": [
+            {
+                "p": "payload"
+            },
+            {
+                "p": "topic",
+                "vt": "str"
+            }
+        ],
+        "repeat": "",
+        "crontab": "",
+        "once": false,
+        "onceDelay": 0.1,
+        "topic": "",
+        "payload": "",
+        "payloadType": "date",
+        "x": 380,
+        "y": 280,
+        "wires": [
+            [
+                "c4647688a76b54d8"
+            ]
+        ]
+    },
+    {
+        "id": "eaed738d1ef32756",
+        "type": "function",
+        "z": "7b85b502d1474e1f",
+        "name": "Prepare bootstrap to trust CA",
+        "func": "const caUrl = global.get('ca_url', 'file');\nconst fp    = global.get('fingerprint', 'file');\n\nif (!caUrl || !fp) {\n  node.error('Missing ca_url or fingerprint in global(file) context');\n  return null;\n}\n\n// One single line, no line breaks:\nmsg.payload = `step ca bootstrap --ca-url \"${caUrl}\" --fingerprint \"${fp}\" --install --force`;\n\nreturn msg;\n",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 1340,
+        "y": 660,
+        "wires": [
+            [
+                "41285516d076c6bb"
+            ]
+        ]
+    },
+    {
+        "id": "41285516d076c6bb",
+        "type": "exec",
+        "z": "7b85b502d1474e1f",
+        "command": "",
+        "addpay": "payload",
+        "append": "",
+        "useSpawn": "false",
+        "timer": "",
+        "winHide": false,
+        "oldrc": false,
+        "name": "Trust CA",
+        "x": 1380,
+        "y": 580,
+        "wires": [
+            [
+                "6bc099c960c63a73"
+            ],
+            [],
+            []
+        ]
+    },
+    {
+        "id": "6bc099c960c63a73",
+        "type": "function",
+        "z": "7b85b502d1474e1f",
+        "name": "Prepare to create MQTTS key and certificate",
+        "func": "\n\n// --- Step 1: File paths ---\nconst certPath = '/etc/mosquitto/certs/cookie.pem';\nconst keyPath = '/etc/mosquitto/certs/cookie-key.pem';\nconst provPassFile = '/etc/mosquitto/certs/provisioner_password';\n\n// --- Step 2: Prepare step-ca command for Exec node ---\nmsg.payload = `step ca certificate cookie \\\n${certPath} \\\n${keyPath} \\\n--san cookie \\\n--san 192.168.153.1 \\\n--provisioner \"Admin JWK\" \\\n--provisioner-password-file ${provPassFile} \\\n--force`;\nnode.warn(\"Registration Completed\");\nreturn msg;\n",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 1690,
+        "y": 580,
+        "wires": [
+            [
+                "0b32f9eae382197a"
+            ]
+        ]
+    },
+    {
+        "id": "0b32f9eae382197a",
+        "type": "exec",
+        "z": "7b85b502d1474e1f",
+        "command": "",
+        "addpay": "payload",
+        "append": "",
+        "useSpawn": "false",
+        "timer": "",
+        "winHide": false,
+        "oldrc": false,
+        "name": "Create MQTTS key and cerificate",
+        "x": 1760,
+        "y": 660,
+        "wires": [
+            [
+                "5d417a2e987e077c"
+            ],
+            [],
+            []
+        ]
+    },
+    {
+        "id": "5d417a2e987e077c",
+        "type": "exec",
+        "z": "7b85b502d1474e1f",
+        "command": "sudo systemctl restart mosquitto-cert-renew.service | sudo systemctl kill -s HUP mosquitto",
+        "addpay": "",
+        "append": "",
+        "useSpawn": "false",
+        "timer": "",
+        "winHide": false,
+        "oldrc": false,
+        "name": "Restart renew service",
+        "x": 2060,
+        "y": 580,
+        "wires": [
+            [],
+            [],
+            []
+        ]
+    },
+    {
+        "id": "873502a2020d1559",
+        "type": "mqtt-broker",
+        "name": "",
+        "broker": "192.168.151.1",
+        "port": "1883",
+        "clientid": "",
+        "autoConnect": true,
+        "usetls": false,
+        "protocolVersion": "4",
+        "keepalive": "60",
+        "cleansession": true,
+        "autoUnsubscribe": true,
+        "birthTopic": "",
+        "birthQos": "0",
+        "birthRetain": "false",
+        "birthPayload": "",
+        "birthMsg": {},
+        "closeTopic": "",
+        "closeQos": "0",
+        "closeRetain": "false",
+        "closePayload": "",
+        "closeMsg": {},
+        "willTopic": "",
+        "willQos": "0",
+        "willRetain": "false",
+        "willPayload": "",
+        "willMsg": {},
+        "userProps": "",
+        "sessionExpiry": ""
+    }
+]
