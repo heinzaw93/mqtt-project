@@ -763,9 +763,7 @@ The SQLCipher database provides:
 * Protection of cryptographic materials
 * Foundation for authentication and encryption
 * Strong application-layer security across all devices
-# Node-RED Setup and Configuration
 
-This section describes how Node-RED is configured across all brokers and client devices to support the secure multi-broker MQTT framework. It includes required libraries, secure configuration (HTTPS and authentication), environment variables, and encrypted runtime storage.
 
 ---
 
