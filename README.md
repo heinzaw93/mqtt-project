@@ -883,3 +883,121 @@ The systemd service ensures that Node-RED automatically recovers from failures a
 Summary
 
 With these configurations, Node-RED operates as a secure orchestration layer within the system. It provides encrypted communication, protected access control, secure storage of runtime data, and integration with cryptographic and certificate management components. This setup enables the implementation of all higher-level security workflows in the proposed secure MQTT framework.
+## Node-RED Flow Folder Structure
+
+This repository organizes Node-RED flows by device role to ensure modular deployment, easy testing, and clear separation of responsibilities. Each device has its own folder containing individual flow files grouped by functionality.
+
+📁 Project Structure
+node-red-flows/
+│
+├── sunny-central-broker/
+│   ├── 01-system-setup.json
+│   ├── 02-device-registration-handler.json
+│   ├── 03-mutual-authentication.json
+│   ├── 04-database-sync.json
+│   ├── 05-topic-registration-key-handler.json
+│   ├── 06-rotation-revocation.json
+│   └── 07-dashboard.json
+│
+├── cookie-bridge-broker/
+│   ├── 01-device-registration.json
+│   ├── 02-mutual-authentication.json
+│   ├── 03-database-sync.json
+│   ├── 04-rotation-revocation.json
+│   └── 05-mitm-simulation.json
+│
+├── cake-bridge-broker/
+│   ├── 01-device-registration.json
+│   ├── 02-mutual-authentication.json
+│   ├── 03-database-sync.json
+│   └── 04-rotation-revocation.json
+│
+├── alice-client/
+│   ├── 01-device-registration.json
+│   ├── 02-mutual-authentication.json
+│   ├── 03-database-sync.json
+│   ├── 04-rotation-revocation.json
+│   ├── 05-baseline-data-transfer.json
+│   └── 06-secure-data-transfer-dashboard.json
+│
+└── bob-mobile-client/
+    ├── 01-device-registration.json
+    ├── 02-mutual-authentication.json
+    ├── 03-database-sync.json
+    ├── 04-rotation-revocation.json
+    ├── 05-baseline-data-transfer.json
+    └── 06-secure-data-transfer-dashboard.json
+Flow Description by Device
+Central Broker (Sunny)
+
+Handles system-wide coordination and security operations:
+
+Certificate Authority (Step-CA) integration
+Device registration handler
+Mutual authentication
+Database synchronization
+Topic key management
+Key/token rotation and revocation
+Monitoring dashboard
+Bridge Broker (Cookie)
+
+Extends network and evaluates security:
+
+Device registration
+Mutual authentication
+Database synchronization
+Rotation and revocation
+MITM attack simulation
+Bridge Broker (Cake)
+
+Provides standard bridging functionality:
+
+Device registration
+Mutual authentication
+Database synchronization
+Rotation and revocation
+Client Device (Alice)
+
+Performs publishing and secure communication:
+
+Device registration
+Mutual authentication
+Database synchronization
+Rotation and revocation
+Baseline data transfer
+Secure data transfer with dashboard
+Mobile Client (Bob)
+
+Similar to Alice with mobile-based operation:
+
+Device registration
+Mutual authentication
+Database synchronization
+Rotation and revocation
+Baseline data transfer
+Secure data transfer
+How to Import Flows
+
+Each .json file represents a Node-RED flow and can be imported individually.
+
+Open Node-RED editor
+Click Menu → Import
+Select the corresponding .json file
+Deploy the flow
+
+Flows should be imported in order (01 → 06/07) to ensure dependencies are satisfied.
+
+Notes for Reviewers
+Each folder represents one physical device in the architecture
+Flows are modular and can be tested independently
+Numbering reflects execution order and dependency
+Central broker flows must be deployed first
+Bridge and client flows connect dynamically via MQTT
+Summary
+
+This folder structure ensures:
+
+Clear separation of device responsibilities
+Modular testing and debugging
+Easy deployment and reproducibility
+Reviewer-friendly navigation of system workflows
